@@ -1,0 +1,15 @@
+{
+  "name": "LLM Chat",
+  "description": "Chat with AI models directly from your GNOME desktop. Supports OpenAI, Gemini, Anthropic, Llama, and Ollama with context-aware conversations and shell integration.",
+  "uuid": "llmchat@charja113.gmail.com",
+  "shell-version": [
+    "42",
+    "43",
+    "44"
+  ],
+  "url": "https://github.com/charja113/gnome-shell-extension-llmchat",
+  "version": 1,
+  "author": "charja113 <charja113@gmail.com>",
+  "settings-schema": "org.gnome.shell.extensions.llmchat",
+  "gettext-domain": "llmchat@charja113.gmail.com"
+}

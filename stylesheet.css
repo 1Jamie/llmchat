@@ -1,0 +1,155 @@
+/* stylesheet.css */
+
+.llm-chat-box {
+  padding: 10px;
+  width: 500px; 
+  min-height: 600px;
+  max-height: 900px; 
+  background-color: rgba(50, 50, 50, 0.8);
+  border-radius: 8px;
+  box-shadow: 0 2px 4px rgba(0, 0, 0, 0.2);
+  display: flex; 
+  flex-direction: column; 
+  resize: vertical;
+  overflow: hidden;
+}
+
+.llm-chat-scrollview {
+  flex: 1; 
+  overflow-y: auto; 
+  margin-bottom: 10px; 
+  padding-right: 8px; 
+}
+
+.llm-chat-message {
+  padding: 8px;
+  margin-bottom: 5px;
+  border-radius: 5px;
+  width: fit-content;
+  max-width: 100%;
+}
+
+.llm-chat-message-user {
+  background-color: rgba(60, 120, 216, 0.8);
+  color: white;
+  text-align: right;
+   margin-left: 20px;
+
+}
+
+.llm-chat-message-ai {
+  background-color: rgba(100, 100, 100, 0.8);
+  color: white;
+  text-align: left;
+  margin-right: 20px;
+}
+
+.llm-chat-message-system {
+  background-color: rgba(70, 70, 70, 0.8);
+  color: #aaa;
+  font-style: italic;
+  text-align: center;
+  margin-left: 40px;
+  margin-right: 40px;
+}
+
+.llm-chat-message-text {
+  color: #eee;
+  font-size: 12pt;
+  white-space: pre-wrap;       
+  word-wrap: break-word;       
+  overflow-wrap: break-word;   
+  max-width: 100%;            
+  min-width: 100px;
+}
+
+.llm-chat-text-container{}
+
+.llm-chat-input-box {
+  margin-top: auto;           
+  width: 100%;               
+  min-height: 60px;          
+  padding: 5px;
+  background-color: rgba(60, 60, 60, 0.8);
+  border-radius: 4px;
+}
+
+.llm-chat-entry {
+  width: 100%;
+  min-height: 40px;          
+  background-color: rgba(40, 40, 40, 0.9);
+  color: white;
+  border: 1px solid #666;
+  border-radius: 4px;
+  padding: 8px;
+  margin-bottom: 5px;
+}
+
+.llm-chat-entry:focus {
+  border-color: rgba(60, 120, 216, 0.8);
+  box-shadow: 0 0 3px rgba(60, 120, 216, 0.5);
+}
+
+.llm-chat-button-box{
+  margin-right: 5px; 
+
+}
+
+.llm-chat-button, .llm-chat-settings-button {
+  padding: 6px 12px;
+  margin-left: 5px;
+  border: 1px solid #666;
+  border-radius: 4px;
+  color: white;
+  background-color: rgba(80, 80, 80, 0.9);
+}
+/* Initially, style the context button like the others */
+.llm-chat-context-button {
+    padding: 6px 12px;
+  margin-left: 5px;
+  border: 1px solid #666;
+  border-radius: 4px;
+  color: white;
+  background-color: rgba(80, 80, 80, 0.9);
+}
+
+/* Style for the SELECTED state of the context button */
+.llm-chat-context-button-selected {
+  background-color: rgba(60, 120, 216, 0.8); 
+  border-color: rgba(60, 120, 216, 0.8); 
+}
+
+/* Tool button styles */
+.llm-chat-tool-button {
+  padding: 5px 10px;
+  margin-left: 5px;
+  border: 1px solid #666;
+  border-radius: 4px;
+  color: white;
+  background-color: rgba(80, 80, 80, 0.9);
+}
+
+.llm-chat-tool-button-selected {
+  background-color: rgba(53, 132, 228, 0.8);
+  border-color: rgba(53, 132, 228, 0.8);
+}
+
+.llm-chat-tool-button:hover {
+  background-color: rgba(100, 100, 100, 0.9);
+  border-color: #888;
+}
+
+.llm-chat-tool-button-selected:hover {
+  background-color: rgba(74, 143, 228, 0.9);
+  border-color: rgba(74, 143, 228, 0.9);
+}
+
+.llm-chat-button:hover, .llm-chat-settings-button:hover, .llm-chat-context-button:hover  {
+  background-color: rgba(100, 100, 100, 0.9);
+  border-color: #888;
+}
+
+.llm-chat-button:active, .llm-chat-settings-button:active, .llm-chat-context-button:active {
+background-color: rgba(120, 120, 120, 0.9);
+  border-color: #aaa;
+}

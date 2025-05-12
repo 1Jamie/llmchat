@@ -1,0 +1,115 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<schemalist>
+  <schema id="org.gnome.shell.extensions.llmchat" path="/org/gnome/shell/extensions/llmchat/">
+    <key name="service-provider" type="s">
+      <default>'openai'</default>
+      <summary>AI Service Provider</summary>
+      <description>The service provider to use for AI interactions (openai, gemini, anthropic, llama, ollama).</description>
+      <choices>
+        <choice value='openai'/>
+        <choice value='gemini'/>
+        <choice value='anthropic'/>
+        <choice value='llama'/>
+        <choice value='ollama'/>
+      </choices>
+    </key>
+    <key name="openai-api-key" type="s">
+      <default>''</default>
+      <summary>OpenAI API Key</summary>
+      <description>API key for OpenAI and compatible services.</description>
+    </key>
+    <key name="openai-model" type="s">
+      <default>'gpt-3.5-turbo'</default>
+      <summary>OpenAI Model</summary>
+      <description>The model to use for OpenAI (e.g., gpt-3.5-turbo, gpt-4).</description>
+       <choices>
+          <choice value='gpt-3.5-turbo'/>
+          <choice value='gpt-4'/>
+      </choices>
+    </key>
+    <key name="openai-temperature" type="d">
+      <default>0.7</default>
+      <range min="0.0" max="2.0"/>
+      <summary>OpenAI Temperature</summary>
+      <description>Controls randomness: lower values make the output more deterministic (0.0-2.0).</description>
+    </key>
+    <key name="gemini-api-key" type="s">
+      <default>''</default>
+      <summary>Google Gemini API Key</summary>
+      <description>API key for Google Gemini service.</description>
+    </key>
+    <key name="gemini-temperature" type="d">
+      <default>0.7</default>
+      <range min="0.0" max="2.0"/>
+      <summary>Gemini Temperature</summary>
+      <description>Controls randomness: lower values make the output more deterministic (0.0-2.0).</description>
+    </key>
+    <key name="anthropic-api-key" type="s">
+      <default>''</default>
+      <summary>Anthropic API Key</summary>
+      <description>API key for Anthropic service.</description>
+    </key>
+    <key name="anthropic-model" type="s">
+        <default>'claude-2'</default>
+        <summary>Anthropic Model</summary>
+        <description>The model to use for Anthropic (e.g., claude-2, claude-instant-1).</description>
+          <choices>
+              <choice value='claude-2'/>
+              <choice value='claude-instant-1'/>
+          </choices>
+    </key>
+    <key name="anthropic-temperature" type="d">
+      <default>0.7</default>
+      <range min="0.0" max="1.0"/>
+      <summary>Anthropic Temperature</summary>
+      <description>Controls randomness: lower values make the output more deterministic (0.0-1.0).</description>
+    </key>
+    <key name="anthropic-max-tokens" type="i">
+        <default>500</default>
+        <summary>Anthropic Max tokens</summary>
+        <description>Max tokens to sample from the Anthropic Model</description>
+    </key>
+    <key name="llama-server-url" type="s">
+      <default>'http://localhost:8080'</default>
+      <summary>Llama Server URL</summary>
+      <description>Server URL for local Llama instance (OpenAI-compatible API).</description>
+    </key>
+    <key name="llama-model-name" type="s">
+      <default>'llama'</default>
+      <summary>Llama Model Name</summary>
+      <description>The model name to use when calling the Llama server API (e.g., llama-2-7b-chat).</description>
+    </key>
+    <key name="llama-temperature" type="d">
+      <default>0.7</default>
+      <range min="0.0" max="2.0"/>
+      <summary>Llama Temperature</summary>
+      <description>Controls randomness: lower values make the output more deterministic (0.0-2.0).</description>
+    </key>
+     <key name="max-response-length" type="i">
+      <default>2000</default>
+      <summary>Maximum Response Length</summary>
+      <description>The maximum length of responses in characters.</description>
+    </key>
+    <key name="ollama-server-url" type="s">
+      <default>'http://localhost:11434'</default>
+      <summary>Ollama Server URL</summary>
+      <description>Server URL for local Ollama instance.</description>
+    </key>
+    <key name="ollama-model-name" type="s">
+      <default>'llama2'</default>
+      <summary>Ollama Model Name</summary>
+      <description>The model name to use when calling the Ollama server API (e.g., llama2, mistral, codellama).</description>
+    </key>
+    <key name="ollama-temperature" type="d">
+      <default>0.7</default>
+      <range min="0.0" max="2.0"/>
+      <summary>Ollama Temperature</summary>
+      <description>Controls randomness: lower values make the output more deterministic (0.0-2.0).</description>
+    </key>
+    <key name="hide-thinking" type="b">
+      <default>false</default>
+      <summary>Hide Thinking Messages</summary>
+      <description>Hide the "thinking" messages while waiting for responses</description>
+    </key>
+  </schema>
+</schemalist>
