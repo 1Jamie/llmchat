@@ -1109,6 +1109,358 @@ class ShellController {
     }
 }
 
+// Provider Adapter class to handle different AI providers
+class ProviderAdapter {
+    constructor(settings) {
+        this._settings = settings;
+    }
+
+    // Common interface for all providers
+    async makeRequest(text, toolCalls = null) {
+        const provider = this._settings.get_string('service-provider');
+        switch (provider) {
+            case 'openai':
+                return this._makeOpenAIRequest(text, toolCalls);
+            case 'gemini':
+                return this._makeGeminiRequest(text, toolCalls);
+            case 'anthropic':
+                return this._makeAnthropicRequest(text, toolCalls);
+            case 'llama':
+                return this._makeLlamaRequest(text, toolCalls);
+            case 'ollama':
+                return this._makeOllamaRequest(text, toolCalls);
+            default:
+                throw new Error(`Unknown provider: ${provider}`);
+        }
+    }
+
+    // Provider-specific request implementations
+    _makeOpenAIRequest(text, toolCalls) {
+        const apiKey = this._settings.get_string('openai-api-key');
+        if (!apiKey) {
+            throw new Error('OpenAI API key is not set');
+        }
+
+        const model = this._settings.get_string('openai-model');
+        const temperature = this._settings.get_double('openai-temperature');
+
+        const requestData = {
+            model: model,
+            messages: [{ role: 'user', content: text }],
+            max_tokens: Math.round(this._settings.get_int('max-response-length') / 4),
+            temperature: temperature
+        };
+
+        if (toolCalls) {
+            requestData.tools = toolCalls;
+            requestData.tool_choice = "auto";
+        }
+
+        const message = Soup.Message.new('POST', 'https://api.openai.com/v1/chat/completions');
+        message.request_headers.append('Authorization', `Bearer ${apiKey}`);
+        message.request_headers.append('Content-Type', 'application/json');
+        message.set_request_body_from_bytes('application/json', new GLib.Bytes(JSON.stringify(requestData)));
+
+        return new Promise((resolve, reject) => {
+            _httpSession.queue_message(message, (session, msg) => {
+                if (msg.status_code !== 200) {
+                    reject(`OpenAI API error: ${msg.status_code}`);
+                    return;
+                }
+                try {
+                    const response = JSON.parse(msg.response_body.data);
+                    resolve({
+                        text: response.choices[0].message.content || '',
+                        toolCalls: response.choices[0].message.tool_calls || []
+                    });
+                } catch (error) {
+                    reject(`Error parsing OpenAI response: ${error.message}`);
+                }
+            });
+        });
+    }
+
+    _makeGeminiRequest(text, toolCalls) {
+        const apiKey = this._settings.get_string('gemini-api-key');
+        if (!apiKey) {
+            throw new Error('Gemini API key is not set');
+        }
+
+        const requestData = {
+            contents: [{
+                parts: [{ text: text }]
+            }]
+        };
+
+        const message = Soup.Message.new('POST', `https://generativelanguage.googleapis.com/v1beta/models/gemini-pro:generateContent?key=${apiKey}`);
+        message.request_headers.append('Content-Type', 'application/json');
+        message.set_request_body_from_bytes('application/json', new GLib.Bytes(JSON.stringify(requestData)));
+
+        return new Promise((resolve, reject) => {
+            _httpSession.queue_message(message, (session, msg) => {
+                if (msg.status_code !== 200) {
+                    reject(`Gemini API error: ${msg.status_code}`);
+                    return;
+                }
+                try {
+                    const response = JSON.parse(msg.response_body.data);
+                    resolve({
+                        text: response.candidates[0].content.parts[0].text || '',
+                        toolCalls: []
+                    });
+                } catch (error) {
+                    reject(`Error parsing Gemini response: ${error.message}`);
+                }
+            });
+        });
+    }
+
+    _makeAnthropicRequest(text, toolCalls) {
+        const apiKey = this._settings.get_string('anthropic-api-key');
+        if (!apiKey) {
+            throw new Error('Anthropic API key is not set');
+        }
+
+        const model = this._settings.get_string('anthropic-model');
+        const temperature = this._settings.get_double('anthropic-temperature');
+        const maxTokens = this._settings.get_int('anthropic-max-tokens');
+
+        const requestData = {
+            model: model,
+            prompt: `\n\nHuman: ${text}\n\nAssistant:`,
+            max_tokens_to_sample: maxTokens,
+            temperature: temperature
+        };
+
+        const message = Soup.Message.new('POST', 'https://api.anthropic.com/v1/complete');
+        message.request_headers.append('X-API-Key', apiKey);
+        message.request_headers.append('Content-Type', 'application/json');
+        message.request_headers.append('anthropic-version', '2023-06-01');
+        message.set_request_body_from_bytes('application/json', new GLib.Bytes(JSON.stringify(requestData)));
+
+        return new Promise((resolve, reject) => {
+            _httpSession.queue_message(message, (session, msg) => {
+                if (msg.status_code !== 200) {
+                    reject(`Anthropic API error: ${msg.status_code}`);
+                    return;
+                }
+                try {
+                    const response = JSON.parse(msg.response_body.data);
+                    resolve({
+                        text: response.completion || '',
+                        toolCalls: []
+                    });
+                } catch (error) {
+                    reject(`Error parsing Anthropic response: ${error.message}`);
+                }
+            });
+        });
+    }
+
+    _makeLlamaRequest(text, toolCalls) {
+        const serverUrl = this._settings.get_string('llama-server-url');
+        if (!serverUrl) {
+            throw new Error('Llama server URL is not set');
+        }
+
+        const modelName = this._settings.get_string('llama-model-name') || 'llama';
+        const temperature = this._settings.get_double('llama-temperature');
+
+        // Create the system message with tool instructions
+        const systemMessage = {
+            role: 'system',
+            content: this._getToolSystemPrompt()
+        };
+
+        // Create the user message
+        const userMessage = {
+            role: 'user',
+            content: text
+        };
+
+        // Prepare the request data
+        const requestData = {
+            model: modelName,
+            messages: [systemMessage, userMessage],
+            max_tokens: Math.round(this._settings.get_int('max-response-length') / 4),
+            temperature: temperature,
+            stream: false
+        };
+
+        // Add tools if tool calling is enabled
+        if (toolCalls) {
+            requestData.tools = this._availableTools;
+            requestData.tool_choice = "auto";
+        }
+
+        log(`Making Llama request with data: ${JSON.stringify(requestData)}`);
+
+        const message = Soup.Message.new('POST', `${serverUrl}/v1/chat/completions`);
+        message.request_headers.append('Content-Type', 'application/json');
+        message.set_request_body_from_bytes('application/json', new GLib.Bytes(JSON.stringify(requestData)));
+
+        return new Promise((resolve, reject) => {
+            _httpSession.queue_message(message, (session, msg) => {
+                if (msg.status_code !== 200) {
+                    const errorMsg = `Llama API error: ${msg.status_code} - ${msg.reason_phrase}`;
+                    log(errorMsg);
+                    reject(errorMsg);
+                    return;
+                }
+
+                try {
+                    const response = JSON.parse(msg.response_body.data);
+                    log(`Received Llama response: ${JSON.stringify(response)}`);
+
+                    if (!response.choices || !response.choices[0] || !response.choices[0].message) {
+                        throw new Error('Invalid response format from Llama API');
+                    }
+
+                    const message = response.choices[0].message;
+                    let text = message.content || '';
+                    let toolCalls = [];
+
+                    // Check for tool calls in the response
+                    if (toolCalls) {
+                        // Look for tool calls in both formats
+                        const toolCallMatch = text.match(/<tool_call>([\s\S]*?)<\/tool_call>/) || 
+                                           text.match(/<([^>]+)>([\s\S]*?)<\/\1>/);
+                        
+                        if (toolCallMatch) {
+                            try {
+                                const toolCallData = JSON.parse(toolCallMatch[2] || toolCallMatch[1]);
+                                log(`Parsed tool call data: ${JSON.stringify(toolCallData)}`);
+                                
+                                toolCalls = [{
+                                    function: {
+                                        name: toolCallData.name,
+                                        arguments: JSON.stringify(toolCallData.arguments || {})
+                                    }
+                                }];
+                                
+                                // Remove the tool call from the text
+                                text = text.replace(/<tool_call>[\s\S]*?<\/tool_call>/, '').trim();
+                                text = text.replace(/<[^>]+>[\s\S]*?<\/[^>]+>/, '').trim();
+                                log(`Text after removing tool call: ${text}`);
+                            } catch (e) {
+                                log(`Error parsing tool call: ${e.message}`);
+                            }
+                        }
+                    }
+
+                    resolve({ text, toolCalls });
+                } catch (error) {
+                    log(`Error processing Llama response: ${error.message}`);
+                    reject(`Error processing Llama response: ${error.message}`);
+                }
+            });
+        });
+    }
+
+    _makeOllamaRequest(text, toolCalls) {
+        const serverUrl = this._settings.get_string('ollama-server-url');
+        if (!serverUrl) {
+            throw new Error('Ollama server URL is not set');
+        }
+
+        const modelName = this._settings.get_string('ollama-model-name') || 'llama2';
+        const temperature = this._settings.get_double('ollama-temperature');
+
+        const requestData = {
+            model: modelName,
+            prompt: text,
+            stream: false,
+            options: {
+                temperature: temperature
+            }
+        };
+
+        if (toolCalls) {
+            requestData.tools = toolCalls;
+            requestData.tool_choice = "auto";
+            requestData.system = this._getToolSystemPrompt();
+        }
+
+        const message = Soup.Message.new('POST', `${serverUrl}/api/generate`);
+        message.request_headers.append('Content-Type', 'application/json');
+        message.set_request_body_from_bytes('application/json', new GLib.Bytes(JSON.stringify(requestData)));
+
+        return new Promise((resolve, reject) => {
+            _httpSession.queue_message(message, (session, msg) => {
+                if (msg.status_code !== 200) {
+                    reject(`Ollama API error: ${msg.status_code}`);
+                    return;
+                }
+                try {
+                    const response = JSON.parse(msg.response_body.data);
+                    let text = response.response || '';
+                    let toolCalls = [];
+
+                    if (toolCalls) {
+                        const toolCallMatch = text.match(/<tool_call>([\s\S]*?)<\/tool_call>/);
+                        if (toolCallMatch) {
+                            try {
+                                const toolCallData = JSON.parse(toolCallMatch[1]);
+                                toolCalls = [{
+                                    function: {
+                                        name: toolCallData.name,
+                                        arguments: JSON.stringify(toolCallData.arguments)
+                                    }
+                                }];
+                                text = text.replace(/<tool_call>[\s\S]*?<\/tool_call>/, '').trim();
+                            } catch (e) {
+                                log(`Error parsing tool call: ${e.message}`);
+                            }
+                        }
+                    }
+
+                    resolve({ text, toolCalls });
+                } catch (error) {
+                    reject(`Error parsing Ollama response: ${error.message}`);
+                }
+            });
+        });
+    }
+
+    _getToolSystemPrompt() {
+        return `You are a helpful AI assistant with access to system tools. 
+When a user asks for information that can be obtained using tools (like time, system info, etc.), 
+you MUST use the appropriate tool to get accurate information.
+
+Available Tools:
+1. get_current_time - Get the current system time
+2. get_current_date - Get the current system date
+3. switch_workspace - Switch to a different workspace (requires workspace_number)
+4. minimize_all_windows - Minimize all windows on the current workspace
+5. maximize_current_window - Maximize the currently focused window
+6. arrange_windows - Arrange windows in a grid pattern (requires rows and columns)
+7. launch_application - Launch an application (requires app_id)
+8. toggle_night_light - Toggle the night light feature
+9. move_window - Move the currently focused window (requires x and y coordinates)
+10. resize_window - Resize the currently focused window (requires width and height)
+11. close_current_window - Close the currently focused window
+12. create_workspace - Create a new workspace
+13. remove_workspace - Remove a workspace (requires workspace_number)
+14. list_installed_apps - List all installed applications
+15. get_running_apps - Get list of currently running applications
+16. set_brightness - Set the screen brightness level (requires level 0-100)
+17. set_volume - Set the system volume level (requires level 0-100)
+18. web_search - Search the internet for information (requires query)
+19. fetch_url_content - Fetch and extract the main content from a specific URL (requires url)
+
+To use a tool, you must respond in this exact format:
+<tool_call>
+{
+    "name": "tool_name",
+    "arguments": {
+        "param1": "value1",
+        "param2": "value2"
+    }
+}
+</tool_call>`;
+    }
+}
+
 class LLMChatBox {
     constructor(settings) {
         this._settings = settings;
@@ -1545,6 +1897,8 @@ class LLMChatBox {
                 return this._shellController.searchWeb(params[0]);
             }
         };
+
+        this._providerAdapter = new ProviderAdapter(settings);
     }
 
     _onEntryActivated() {
@@ -1721,32 +2075,69 @@ class LLMChatBox {
         const context = this._prepareContext();
         const fullPrompt = context + history + message;
 
-        // Get selected service provider
-        const provider = this._settings.get_string('service-provider');
-        switch (provider) {
-            case 'openai':
-                log('Calling OpenAI API...');
-                this._callOpenAI(fullPrompt);
-                break;
-            case 'gemini':
-                log('Calling Gemini API...');
-                this._callGemini(fullPrompt);
-                break;
-            case 'anthropic':
-                log('Calling Anthropic API...');
-                this._callAnthropic(fullPrompt);
-                break;
-            case 'llama':
-                log('Calling Llama API...');
-                this._callLlama(fullPrompt);
-                break;
-            case 'ollama':
-                log('Calling Ollama API...');
-                this._callOllama(fullPrompt);
-                break;
-            default:
-                this._addMessage('Error: Unknown service provider', 'system');
-        }
+        // Make the API request using the provider adapter
+        this._providerAdapter.makeRequest(fullPrompt, this._toolCallingEnabled ? this._availableTools : null)
+            .then(response => {
+                if (response.toolCalls && response.toolCalls.length > 0) {
+                    this._handleToolCalls(response.toolCalls, response.text);
+                } else {
+                    this._addMessage(response.text, 'ai');
+                }
+            })
+            .catch(error => {
+                this._addMessage(`Error: ${error.message}`, 'ai');
+            });
+    }
+
+    _handleToolCalls(toolCalls, originalResponse) {
+        // Create an array of promises for all tool calls
+        const toolPromises = toolCalls.map(toolCall => {
+            return new Promise((resolve, reject) => {
+                try {
+                    const result = this._executeToolCall({
+                        name: toolCall.function.name,
+                        arguments: JSON.parse(toolCall.function.arguments)
+                    });
+                    
+                    if (result instanceof Promise) {
+                        result.then(resolve).catch(reject);
+                    } else {
+                        resolve(result);
+                    }
+                } catch (error) {
+                    reject(error);
+                }
+            });
+        });
+
+        // Wait for all tool calls to complete
+        Promise.all(toolPromises)
+            .then(results => {
+                const toolResults = results.map((result, index) => ({
+                    name: toolCalls[index].function.name,
+                    result: result
+                }));
+
+                // If we have tool results, make a follow-up request
+                if (toolResults.length > 0) {
+                    const toolResultsText = toolResults.map(result => 
+                        `Tool '${result.name}' returned:\n${result.result}`
+                    ).join('\n\n');
+
+                    const followUpPrompt = `${originalResponse}\n\nTool results:\n${toolResultsText}\n\nPlease provide a complete response using the tool results above. Include relevant information from the search results and cite sources when available.`;
+                    
+                    this._providerAdapter.makeRequest(followUpPrompt)
+                        .then(response => {
+                            this._addMessage(response.text, 'ai');
+                        })
+                        .catch(error => {
+                            this._addMessage(`Error in follow-up request: ${error.message}`, 'ai');
+                        });
+                }
+            })
+            .catch(error => {
+                this._addMessage(`Error executing tool calls: ${error.message}`, 'ai');
+            });
     }
 
     _getConversationHistory() {
@@ -1775,455 +2166,6 @@ class LLMChatBox {
         });
         
         return history;
-    }
-
-    _callOpenAI(text) {
-        const apiKey = this._settings.get_string('openai-api-key');
-        if (!apiKey) {
-            this._addMessage('Error: OpenAI API key is not set. Please configure it in settings.', 'ai');
-            return;
-        }
-        const model = this._settings.get_string('openai-model');
-        const temperature = this._settings.get_double('openai-temperature');
-
-        // Prepare the request data
-        const requestData = {
-            model: model,
-            messages: [
-                {
-                    role: 'user',
-                    content: text
-                }
-            ],
-            max_tokens: Math.round(this._maxResponseLength / 4),
-            temperature: temperature
-        };
-
-        // Add tools if tool calling is enabled
-        if (this._toolCallingEnabled) {
-            requestData.tools = this._availableTools;
-            requestData.tool_choice = "auto";
-        }
-
-        // Set up the message
-        const message = Soup.Message.new('POST', 'https://api.openai.com/v1/chat/completions');
-        message.request_headers.append('Authorization', `Bearer ${apiKey}`);
-        message.request_headers.append('Content-Type', 'application/json');
-        message.set_request_body_from_bytes('application/json', new GLib.Bytes(JSON.stringify(requestData)));
-
-        // Send the request
-        _httpSession.queue_message(message, (session, msg) => {
-            this._handleApiResponse(msg, 'OpenAI');
-        });
-    }
-      _callGemini(text) {
-      const apiKey = this._settings.get_string('gemini-api-key');
-      if (!apiKey) {
-          this._addMessage('Error: Gemini API key is not set. Please configure it in settings.', 'ai');
-          return;
-      }
-
-      // Prepare the request data
-        const requestData = JSON.stringify({
-            contents: [
-                {
-                    parts: [
-                        {
-                            text: text
-                        }
-                    ]
-                }
-            ]
-        });
-
-      // Set up the message and replace the key
-      const message = Soup.Message.new('POST', `https://generativelanguage.googleapis.com/v1beta/models/gemini-pro:generateContent?key=${apiKey}`);
-      message.request_headers.append('Content-Type', 'application/json');
-      message.set_request_body_from_bytes('application/json', new GLib.Bytes(requestData));
-
-      // Send the request
-      _httpSession.queue_message(message, (session, msg) => {
-          this._handleApiResponse(msg, 'Gemini');
-      });
-    }
-
-      _callAnthropic(text) {
-        const apiKey = this._settings.get_string('anthropic-api-key');
-        if (!apiKey) {
-            this._addMessage('Error: Anthropic API key is not set. Please configure it in settings.', 'ai');
-            return;
-        }
-        const anthropicModel = this._settings.get_string('anthropic-model');
-        const temperature = this._settings.get_double('anthropic-temperature');
-        const max_tokens_to_sample = this._settings.get_int('anthropic-max-tokens');
-
-        // Prepare the request data for Anthropic
-        const requestData = JSON.stringify({
-            model: anthropicModel, // Consider making this configurable
-            prompt: `\n\nHuman: ${text}\n\nAssistant:`,
-            max_tokens_to_sample: max_tokens_to_sample, //Consider making configurable
-            temperature: temperature //Consider making configurable
-        });
-
-        // Set up the message
-        const message = Soup.Message.new('POST', 'https://api.anthropic.com/v1/complete');
-        message.request_headers.append('X-API-Key', apiKey);
-        message.request_headers.append('Content-Type', 'application/json');
-        message.request_headers.append('anthropic-version', '2023-06-01'); // Add version header.
-        message.set_request_body_from_bytes('application/json', new GLib.Bytes(requestData));
-
-        // Send the request
-        _httpSession.queue_message(message, (session, msg) => {
-            this._handleApiResponse(msg, 'Anthropic');
-        });
-    }
-      _callLlama(text) {
-      const serverUrl = this._settings.get_string('llama-server-url');
-      if (!serverUrl) {
-        this._addMessage(
-          'Error: Llama server URL is not set. Please configure it in settings.',
-          'ai'
-        );
-        return;
-      }
-      const temperature = this._settings.get_double('llama-temperature');
-
-      // Get the model name from settings
-      const modelName = this._settings.get_string('llama-model-name') || 'llama';
-
-      // Prepare the request data for Llama (OpenAI-compatible format)
-      const requestData = JSON.stringify({
-        model: modelName,
-        messages: [
-          {
-            role: 'user',
-            content: text,
-          },
-        ],
-        max_tokens: Math.round(this._maxResponseLength / 4), // Approximate tokens to characters conversion
-        temperature: temperature,
-      });
-
-      // Set up the message including serverUrl
-      const message = Soup.Message.new('POST', `${serverUrl}/v1/chat/completions`);
-      message.request_headers.append('Content-Type', 'application/json');
-      message.set_request_body_from_bytes('application/json', new GLib.Bytes(requestData));
-
-      _httpSession.queue_message(message, (session, msg) => {
-          this._handleApiResponse(msg, 'Llama');
-      });
-    }
-
-    _callOllama(text) {
-        const serverUrl = this._settings.get_string('ollama-server-url');
-        log(`Attempting Ollama API call to server: ${serverUrl}`);
-        
-        if (!serverUrl) {
-            this._addMessage('Error: Ollama server URL is not set. Please configure it in settings.', 'ai');
-            return;
-        }
-        const temperature = this._settings.get_double('ollama-temperature');
-        const modelName = this._settings.get_string('ollama-model-name') || 'llama2';
-        
-        log(`Ollama settings - Model: ${modelName}, Temperature: ${temperature}`);
-
-        // Prepare the request data for Ollama
-        const requestData = {
-            model: modelName,
-            prompt: text,
-            stream: false,
-            options: {
-                temperature: temperature
-            }
-        };
-
-        // Add tools if tool calling is enabled
-        if (this._toolCallingEnabled) {
-            requestData.tools = this._availableTools;
-            requestData.tool_choice = "auto";
-            
-            // Add system message to instruct the model about tool usage
-            requestData.system = `You are a helpful AI assistant with access to system tools. 
-When a user asks for information that can be obtained using tools (like time, system info, etc.), 
-you MUST use the appropriate tool to get accurate information.
-
-Available Tools:
-1. get_current_time - Get the current system time
-2. get_current_date - Get the current system date
-3. switch_workspace - Switch to a different workspace (requires workspace_number)
-4. minimize_all_windows - Minimize all windows on the current workspace
-5. maximize_current_window - Maximize the currently focused window
-6. arrange_windows - Arrange windows in a grid pattern (requires rows and columns)
-7. launch_application - Launch an application (requires app_id)
-8. toggle_night_light - Toggle the night light feature
-9. move_window - Move the currently focused window (requires x and y coordinates)
-10. resize_window - Resize the currently focused window (requires width and height)
-11. close_current_window - Close the currently focused window
-12. create_workspace - Create a new workspace
-13. remove_workspace - Remove a workspace (requires workspace_number)
-14. list_installed_apps - List all installed applications
-15. get_running_apps - Get list of currently running applications
-16. set_brightness - Set the screen brightness level (requires level 0-100)
-17. set_volume - Set the system volume level (requires level 0-100)
-18. web_search - Search the internet for information (requires query)
-19. fetch_url_content - Fetch and extract the main content from a specific URL (requires url)
-
-To use a tool, you must respond in this exact format:
-<tool_call>
-{
-    "name": "tool_name",
-    "arguments": {
-        "param1": "value1",
-        "param2": "value2"
-    }
-}
-</tool_call>
-
-Examples:
-1. For getting the current time:
-<tool_call>
-{
-    "name": "get_current_time",
-    "arguments": {}
-}
-</tool_call>
-
-2. For switching workspaces:
-<tool_call>
-{
-    "name": "switch_workspace",
-    "arguments": {
-        "workspace_number": 2
-    }
-}
-</tool_call>
-
-3. For launching an application:
-<tool_call>
-{
-    "name": "launch_application",
-    "arguments": {
-        "app_id": "firefox"
-    }
-}
-</tool_call>
-
-4. For searching the web:
-<tool_call>
-{
-    "name": "web_search",
-    "arguments": {
-        "query": "latest news about AI"
-    }
-}
-</tool_call>
-
-5. For fetching content from a URL:
-<tool_call>
-{
-    "name": "fetch_url_content",
-    "arguments": {
-        "url": "https://example.com/article"
-    }
-}
-</tool_call>
-
-IMPORTANT RULES:
-1. ALWAYS use tools when they can provide accurate information
-2. NEVER make up information that can be obtained from tools
-3. ALWAYS use the exact tool_call format shown above
-4. Wait for tool responses before providing your final answer
-5. If a tool fails, acknowledge the failure and try an alternative if available
-6. When you receive tool results, use them to provide a complete and accurate response
-7. For tools that require parameters, make sure to provide all required parameters
-8. Use the most appropriate tool for the user's request
-9. You can use multiple tools in sequence if needed
-10. Always verify the tool results before providing your final response
-11. For web searches, use specific and relevant search queries
-12. When using web search results, cite the sources in your response
-13. After getting search results, use fetch_url_content to get detailed information from relevant URLs
-14. When fetching URL content, make sure the URL is valid and accessible`;
-        }
-        
-        log(`Ollama request data: ${JSON.stringify(requestData)}`);
-
-        // Set up the message
-        const message = Soup.Message.new('POST', `${serverUrl}/api/generate`);
-        message.request_headers.append('Content-Type', 'application/json');
-        message.set_request_body_from_bytes('application/json', new GLib.Bytes(JSON.stringify(requestData)));
-        
-        log('Sending Ollama request...');
-
-        _httpSession.queue_message(message, (session, msg) => {
-            log(`Ollama response received - Status: ${msg.status_code}`);
-            if (msg.status_code !== 200) {
-                log(`Ollama error response: ${msg.response_body.data}`);
-            }
-            this._handleApiResponse(msg, 'Ollama');
-        });
-    }
-
-    _handleApiResponse(msg, providerName) {
-        if (msg.status_code !== 200) {
-            this._addMessage(`Error: ${msg.status_code} - ${msg.reason_phrase} (${providerName})`, 'ai');
-            return;
-        }
-
-        try {
-            log(`Received ${providerName} API response with status code ${msg.status_code}`);
-            const responseData = JSON.parse(msg.response_body.data);
-            let responseText = '';
-            let toolCalls = [];
-
-            // Extract response and tool calls based on provider
-            switch (providerName) {
-                case 'OpenAI':
-                    const message = responseData.choices[0].message;
-                    responseText = message.content || '';
-                    log(`OpenAI response text extracted, length: ${responseText.length}`);
-                    
-                    // Handle tool calls if present
-                    if (message.tool_calls) {
-                        toolCalls = message.tool_calls;
-                    }
-                    break;
-                case 'Ollama':
-                    responseText = responseData.response || '';
-                    log(`Ollama response text extracted, length: ${responseText.length}`);
-                    
-                    // Check for tool calls in Ollama response
-                    if (this._toolCallingEnabled) {
-                        // Look for tool call format in the response
-                        const toolCallMatch = responseText.match(/<tool_call>([\s\S]*?)<\/tool_call>/);
-                        if (toolCallMatch) {
-                            try {
-                                const toolCallData = JSON.parse(toolCallMatch[1]);
-                                toolCalls = [{
-                                    function: {
-                                        name: toolCallData.name,
-                                        arguments: JSON.stringify(toolCallData.arguments)
-                                    }
-                                }];
-                                // Remove the tool call from the response text
-                                responseText = responseText.replace(/<tool_call>[\s\S]*?<\/tool_call>/, '').trim();
-                                log(`Ollama response after removing tool call, length: ${responseText.length}`);
-                            } catch (e) {
-                                log(`Error parsing tool call: ${e.message}`);
-                            }
-                        }
-                    }
-                    break;
-                case 'Gemini':
-                    responseText = responseData.candidates[0].content.parts[0].text || '';
-                    log(`Gemini response text extracted, length: ${responseText.length}`);
-                    break;
-                case 'Anthropic':
-                    responseText = responseData.completion || '';
-                    log(`Anthropic response text extracted, length: ${responseText.length}`);
-                    break;
-                case 'Llama':
-                    responseText = responseData.choices[0].message.content || '';
-                    log(`Llama response text extracted, length: ${responseText.length}`);
-                    break;
-                default:
-                    responseText = 'Error: Unknown provider response format';
-                    log(`Unknown provider: ${providerName}`);
-            }
-
-            // Execute tool calls if any
-            if (toolCalls.length > 0) {
-                log(`Received ${toolCalls.length} tool calls`);
-                
-                // Create an array of promises for all tool calls
-                const toolPromises = toolCalls.map(toolCall => {
-                    return new Promise((resolve, reject) => {
-                        try {
-                            const result = this._executeToolCall({
-                                name: toolCall.function.name,
-                                arguments: JSON.parse(toolCall.function.arguments)
-                            });
-                            
-                            if (result instanceof Promise) {
-                                result.then(resolve).catch(reject);
-                            } else {
-                                resolve(result);
-                            }
-                        } catch (error) {
-                            reject(error);
-                        }
-                    });
-                });
-
-                // Wait for all tool calls to complete
-                Promise.all(toolPromises)
-                    .then(results => {
-                        const toolResults = results.map((result, index) => ({
-                            name: toolCalls[index].function.name,
-                            result: result
-                        }));
-
-                        // If we have tool results, make a follow-up request
-                        if (toolResults.length > 0) {
-                            const toolResultsText = toolResults.map(result => 
-                                `Tool '${result.name}' returned:\n${result.result}`
-                            ).join('\n\n');
-
-                            const followUpPrompt = `${responseText}\n\nTool results:\n${toolResultsText}\n\nPlease provide a complete response using the tool results above. Include relevant information from the search results and cite sources when available.`;
-                            
-                            log('Making follow-up request with tool results');
-                            
-                            this._makeFollowUpRequest(followUpPrompt, toolResults);
-                        }
-                    })
-                    .catch(error => {
-                        log(`Error executing tool calls: ${error.message}`);
-                        this._addMessage(`Error executing tool calls: ${error.message}`, 'ai');
-                    });
-                return;
-            }
-
-            if (responseText) {
-                log(`${providerName} API Response ready to display, contains <think> tags: ${responseText.includes('<think>')}, length: ${responseText.length}`);
-                this._addMessage(responseText, 'ai');
-            } else {
-                log(`Warning: Empty ${providerName} response, not displaying anything`);
-            }
-        } catch (e) {
-            log(`Error parsing response: ${e.message}`);
-            this._addMessage(`Error parsing response: ${e.message} (${providerName})`, 'ai');
-        }
-    }
-
-    _makeFollowUpRequest(originalResponse, toolResults) {
-        const serviceProvider = this._settings.get_string('service-provider');
-        const toolResultsText = toolResults.map(result => 
-            `Tool '${result.name}' returned:\n${result.result}`
-        ).join('\n\n');
-
-        const followUpPrompt = `${originalResponse}\n\nTool results:\n${toolResultsText}\n\nPlease provide a complete response using the tool results above. Include relevant information from the search results and cite sources when available.`;
-
-        log('Making follow-up request with tool results');
-        log(`Follow-up prompt: ${followUpPrompt}`);
-        
-        switch (serviceProvider) {
-            case 'ollama':
-                this._callOllama(followUpPrompt);
-                break;
-            case 'openai':
-                this._callOpenAI(followUpPrompt);
-                break;
-            case 'gemini':
-                this._callGemini(followUpPrompt);
-                break;
-            case 'anthropic':
-                this._callAnthropic(followUpPrompt);
-                break;
-            case 'llama':
-                this._callLlama(followUpPrompt);
-                break;
-            default:
-                this._addMessage('Error: Unknown service provider', 'ai');
-        }
     }
 
     _addMessage(text, sender, thinking = false) {
