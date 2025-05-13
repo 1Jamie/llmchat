@@ -1466,7 +1466,6 @@ class LLMChatBox {
         this._settings = settings;
         this._messages = [];
         this._maxResponseLength = settings.get_int('max-response-length');
-        this._contextEnabled = false;
         this._maxInitialHeight = 800;
         this._initialHeight = 600;
         this._sessionId = GLib.uuid_string_random(); // Generate unique session ID
@@ -1582,15 +1581,6 @@ class LLMChatBox {
         });
         sendButton.connect('clicked', this._onSendButtonClicked.bind(this));
         buttonBox.add_child(sendButton);
-
-        // Context toggle button
-        this._contextToggleButton = new St.Button({
-            style_class: 'llm-chat-context-button', // Initial style (unselected)
-            label: 'Context: OFF'
-        });
-        this._contextToggleButton._clickHandlerId = this._contextToggleButton.connect('clicked', this._onContextToggleClicked.bind(this));
-        buttonBox.add_child(this._contextToggleButton);
-
 
         // Settings button
         const settingsIcon = new St.Icon({
@@ -1833,6 +1823,20 @@ class LLMChatBox {
                     },
                     required: ["url"]
                 }
+            },
+            {
+                name: "get_system_context",
+                description: "Get detailed information about the current system state including hardware, running processes, open windows, and more",
+                parameters: {
+                    type: "object",
+                    properties: {
+                        detail_level: {
+                            type: "string",
+                            description: "Level of detail to include: 'basic', 'standard', or 'detailed'",
+                            enum: ["basic", "standard", "detailed"]
+                        }
+                    }
+                }
             }
         ];
 
@@ -1921,18 +1925,6 @@ class LLMChatBox {
         ExtensionUtils.openPrefs();
     }
 
-     _onContextToggleClicked() {
-        this._contextEnabled = !this._contextEnabled;
-        this._contextToggleButton.label = this._contextEnabled ? 'Context: ON' : 'Context: OFF';
-
-        // Toggle the style class for visual feedback
-        if (this._contextEnabled) {
-            this._contextToggleButton.add_style_class_name('llm-chat-context-button-selected');
-        } else {
-            this._contextToggleButton.remove_style_class_name('llm-chat-context-button-selected');
-        }
-    }
-
     _onToolCallingToggleClicked() {
         this._toolCallingEnabled = !this._toolCallingEnabled;
         this._toolCallingToggleButton.label = this._toolCallingEnabled ? 'Tools: ON' : 'Tools: OFF';
@@ -1966,6 +1958,10 @@ class LLMChatBox {
                     }
                     
                     return this._shellController.fetchUrlContent(url);
+                
+                case 'get_system_context':
+                    const detailLevel = toolCall.arguments.detail_level || 'standard';
+                    return this._prepareContext(detailLevel);
                 
                 case 'switch_workspace':
                     return this._shellController.switchWorkspace(toolCall.arguments.workspace_number);
@@ -2071,9 +2067,8 @@ class LLMChatBox {
             return;
         }
 
-        // Prepare context (if enabled) and construct the full prompt
-        const context = this._prepareContext();
-        const fullPrompt = context + history + message;
+        // Construct the full prompt with just conversation history
+        const fullPrompt = history + message;
 
         // Make the API request using the provider adapter
         this._providerAdapter.makeRequest(fullPrompt, this._toolCallingEnabled ? this._availableTools : null)
@@ -2266,49 +2261,47 @@ class LLMChatBox {
         this.actor.height = Math.max(height, this._initialHeight);
     }
 
-    _prepareContext() {
-        if (!this._contextEnabled) {
-            return "";
-        }
-
+    _prepareContext(detailLevel = 'standard') {
         // Basic system information
         const systemInfo = getSystemInfo();
         const kernelAndUptime = getKernelAndUptime();
-        const detailedCpuInfo = getDetailedCpuInfo();
-        const gpuInfo = getGpuInfo();
         
-        // Resource usage
-        const cpuUsage = getCpuUsage();
-        const diskUsage = getDiskUsage();
-        const networkInfo = getNetworkInfo();
-        
-        // Window and workspace information
-        const workspace = getCurrentWorkspaceInfo();
-        const focusedWindowTitle = getFocusedWindowTitle();
-        const runningApps = getRunningApps();
-        
-        // User selection and clipboard
-        const selectedText = getSelectedText();
-        const clipboardContent = getClipboardContent();
-        
-        // Process information
-        const topProcesses = getTopProcesses(10);
-        
-        // Get open windows last to ensure we have the most up-to-date information
-        const openWindows = getOpenWindows();
-
         // Build the context string
         let contextString = "--- System Context ---\n";
         contextString += `${systemInfo}\n`;
-        if (detailedCpuInfo) contextString += detailedCpuInfo;
-        if (gpuInfo) contextString += `${gpuInfo}\n`;
-        contextString += `${cpuUsage}\n`;
-        contextString += `${diskUsage}\n`;
         contextString += kernelAndUptime + "\n";
-        contextString += networkInfo;
+        
+        // Add focused window and workspace info in all detail levels
+        const workspace = getCurrentWorkspaceInfo();
+        const focusedWindowTitle = getFocusedWindowTitle();
         contextString += `Current Workspace: ${workspace}\n`;
         contextString += `Focused Window: ${focusedWindowTitle}\n`;
 
+        if (detailLevel === 'basic') {
+            // Basic level just includes the information above
+            contextString += "--- End System Context ---\n\n";
+            return contextString;
+        }
+        
+        // Standard and detailed levels include CPU, GPU, disk usage
+        const cpuUsage = getCpuUsage();
+        const diskUsage = getDiskUsage();
+        const detailedCpuInfo = getDetailedCpuInfo();
+        const gpuInfo = getGpuInfo();
+        
+        contextString += `${cpuUsage}\n`;
+        if (detailedCpuInfo) contextString += detailedCpuInfo;
+        if (gpuInfo) contextString += `${gpuInfo}\n`;
+        contextString += `${diskUsage}\n`;
+
+        // Add network info for standard and detailed levels
+        const networkInfo = getNetworkInfo();
+        contextString += networkInfo + "\n";
+        
+        // Get clipboard and selection data
+        const selectedText = getSelectedText();
+        const clipboardContent = getClipboardContent();
+        
         // Add clipboard content if available
         if (clipboardContent) {
             contextString += "Clipboard Content:\n";
@@ -2321,51 +2314,57 @@ class LLMChatBox {
             contextString += `  ${selectedText.replace(/\n/g, '\n  ')}\n`;
         }
 
-        // Add running applications
-        if (runningApps.length > 0) {
-            contextString += "Running Applications:\n";
-            runningApps.forEach(app => {
-                contextString += `  - ${app.name} (${app.windows} windows)\n`;
-            });
-        }
+        // For detailed level, include running apps, processes and windows
+        if (detailLevel === 'detailed') {
+            // Running applications
+            const runningApps = getRunningApps();
+            if (runningApps.length > 0) {
+                contextString += "Running Applications:\n";
+                runningApps.forEach(app => {
+                    contextString += `  - ${app.name} (${app.windows} windows)\n`;
+                });
+            }
 
-        // Add top processes information
-        if (topProcesses && topProcesses.length > 0) {
-            contextString += "Top Processes (CPU/Memory):\n";
-            topProcesses.forEach(proc => {
-                // Start with basic process info that should always be available
-                let processInfo = `  - ${proc.command || 'Unknown'} (PID ${proc.pid || 'Unknown'})`;
-                
-                // Add CPU info if available
-                if (proc.cpu && proc.cpu !== 'N/A') {
-                    processInfo += `, CPU: ${proc.cpu}`;
-                }
-                
-                // Add memory info if available
-                if (proc.memory && proc.memory !== 'N/A') {
-                    processInfo += `, Mem: ${proc.memory}`;
-                }
-                
-                // Add user info if available
-                if (proc.user) {
-                    processInfo += `, User: ${proc.user}`;
-                }
-                
-                contextString += processInfo + "\n";
-            });
-        }
-        
-        // Display open windows with more details
-        if (openWindows.length > 0) {
-            contextString += "Open Windows:\n";
-            openWindows.forEach(window => {
-                const workspaceInfo = window.onCurrentWorkspace ? " (current workspace)" : 
-                                     (window.workspace > 0 ? ` (workspace ${window.workspace})` : "");
-                const minimizedInfo = window.minimized ? " [minimized]" : "";
-                contextString += `  - ${window.title}${workspaceInfo}${minimizedInfo}, App: ${window.application}\n`;
-            });
-        } else {
-            contextString += "Open Windows: None\n";
+            // Top processes
+            const topProcesses = getTopProcesses(10);
+            if (topProcesses && topProcesses.length > 0) {
+                contextString += "Top Processes (CPU/Memory):\n";
+                topProcesses.forEach(proc => {
+                    // Start with basic process info that should always be available
+                    let processInfo = `  - ${proc.command || 'Unknown'} (PID ${proc.pid || 'Unknown'})`;
+                    
+                    // Add CPU info if available
+                    if (proc.cpu && proc.cpu !== 'N/A') {
+                        processInfo += `, CPU: ${proc.cpu}`;
+                    }
+                    
+                    // Add memory info if available
+                    if (proc.memory && proc.memory !== 'N/A') {
+                        processInfo += `, Mem: ${proc.memory}`;
+                    }
+                    
+                    // Add user info if available
+                    if (proc.user) {
+                        processInfo += `, User: ${proc.user}`;
+                    }
+                    
+                    contextString += processInfo + "\n";
+                });
+            }
+            
+            // Open windows with details
+            const openWindows = getOpenWindows();
+            if (openWindows.length > 0) {
+                contextString += "Open Windows:\n";
+                openWindows.forEach(window => {
+                    const workspaceInfo = window.onCurrentWorkspace ? " (current workspace)" : 
+                                         (window.workspace > 0 ? ` (workspace ${window.workspace})` : "");
+                    const minimizedInfo = window.minimized ? " [minimized]" : "";
+                    contextString += `  - ${window.title}${workspaceInfo}${minimizedInfo}, App: ${window.application}\n`;
+                });
+            } else {
+                contextString += "Open Windows: None\n";
+            }
         }
         
         contextString += "--- End System Context ---\n\n";
@@ -2486,12 +2485,6 @@ class Extension {
                     if (this._button._chatBox._clickAction) {
                         this._button._chatBox._clickAction.disconnect_all();
                         this._button._chatBox._clickAction.destroy();
-                    }
-                }
-
-                if (this._button._chatBox._contextToggleButton) {
-                    if (this._button._chatBox._contextToggleButton._clickHandlerId) {
-                        this._button._chatBox._contextToggleButton.disconnect(this._button._chatBox._contextToggleButton._clickHandlerId);
                     }
                 }
 
