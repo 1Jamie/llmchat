@@ -10,11 +10,6 @@ The only ones verifiable working ~well ish is the ollama provider and llamacpp. 
 - **Multiple AI Models**: Supports various AI services:
   - Llama (local via API)
   - Ollama (local)
-  - OpenAI (GPT models) **
-  - Google Gemini **
-  - Anthropic Claude **
-
-  **: not tested or known to not be working 
 
 
 - **System Information Tools**: Access system information through AI tool calls including:
@@ -69,7 +64,7 @@ The only ones verifiable working ~well ish is the ollama provider and llamacpp. 
 
 Click the settings icon in the extension menu or use GNOME Extensions app to configure:
 
-1. **Select AI Provider**: Choose from OpenAI, Gemini, Anthropic, Llama, or Ollama
+1. **Select AI Provider**: Choose from Llamacpp, or Ollama
 2. **API Keys**: Enter your API keys for cloud-based services
 3. **Server URLs**: Configure local model server addresses
 4. **Model Settings**: Select models and adjust parameters like temperature
@@ -81,36 +76,71 @@ Click the settings icon in the extension menu or use GNOME Extensions app to con
 2. Type your message and press Enter or click Send
 3. Toggle Tools to enable AI to interact with the shell and web tools
 
+## Tool System
+
+The extension uses a modular tool system that allows the AI to interact with your system through structured function calls. When the "Tools: ON" toggle is enabled in the chat interface, the AI can automatically choose and call appropriate tools based on your requests.
+
+### How Tools Work
+
+Tools are implemented as separate JavaScript modules in the `tools/` directory. Each tool extends a base class and provides specific functionality like system information, window management, or web search.
+
+The extension loads tools dynamically using the `ToolLoader` system, making it easy to add new capabilities without modifying the core extension code.
+
 ### Available Tools
 
-When tools are enabled, the AI can use the following capabilities:
+The extension currently includes these tools:
 
-- **System Context**: `get_system_context` - Get detailed system information at various detail levels
-- **Window Management**:
-  - `switch_workspace` - Switch to a specific workspace
-  - `minimize_all_windows` - Minimize all windows
-  - `maximize_current_window` - Maximize the active window
-  - `arrange_windows` - Arrange windows in a grid
-  - `move_window` - Move a window to specific coordinates
-  - `resize_window` - Resize a window to specific dimensions
-  - `close_current_window` - Close the active window
-- **Workspace Management**:
-  - `create_workspace` - Create a new workspace
-  - `remove_workspace` - Remove a workspace
-- **Application Control**:
-  - `launch_application` - Launch an application
-  - `list_installed_apps` - Get a list of installed applications
-  - `get_running_apps` - Get a list of running applications
-- **System Settings**:
-  - `toggle_night_light` - Toggle night light feature
-  - `set_brightness` - Set screen brightness
-  - `set_volume` - Set system volume
-- **Time and Date**:
-  - `get_current_time` - Get the current system time
-  - `get_current_date` - Get the current date
-- **Web Integration**:
-  - `web_search` - Search the web for information
-  - `fetch_url_content` - Fetch content from a URL
+#### SystemContextTool
+- **Name:** `system_context`
+- **Description:** Get system context information including windows, workspaces, system info, and clipboard content
+- **Functions:** Get active window title, workspace information, system specifications, RAM usage, CPU info, running applications, clipboard content, and selected text
+- **Example Use:** "What applications are running on my system right now?"
+
+#### TimeDateTool
+- **Name:** `time_date`
+- **Description:** Get time and date information from the system
+- **Functions:** Current time, date, timezone, calendar information
+- **Example Use:** "What time is it?" or "What's today's date?"
+
+#### WebSearchTool
+- **Name:** `web_search`
+- **Description:** Search the web for information
+- **Functions:** Perform web searches and return results
+- **Example Use:** "Search the web for the latest news about GNOME Shell"
+
+#### ApplicationManagementTool 
+- **Name:** `application_management`
+- **Description:** Launch and manage applications
+- **Functions:** Launch apps, list installed apps, get running apps
+- **Example Use:** "Launch Firefox" or "What applications do I have installed?"
+
+#### DisplayManagementTool
+- **Name:** `display_management`
+- **Description:** Control display settings
+- **Functions:** Set brightness, change display settings
+- **Example Use:** "Set my screen brightness to 80%"
+
+#### SystemSettingsTool
+- **Name:** `system_settings` 
+- **Description:** Access and modify system settings
+- **Functions:** Toggle night light, modify system settings
+- **Example Use:** "Turn on night light" or "Turn down the volume"
+
+### Creating Custom Tools
+
+You can create your own tools to extend the capability of the extension. The process is as follows:
+
+1. Copy `tools/ToolTemplate.js` to a new file in the `tools/` directory
+2. Modify the tool class with your implementation
+3. Restart the extension to load your custom tool
+
+Each tool follows a standard format that includes:
+- Unique name and category
+- Parameter definitions with types and descriptions
+- An execute method that implements the tool's functionality
+- Structured return values
+
+See the `tools/README.md` file for detailed information on creating custom tools.
 
 ### Shell Commands
 

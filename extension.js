@@ -10,620 +10,15 @@ const PopupMenu = imports.ui.popupMenu;
 const ExtensionUtils = imports.misc.extensionUtils;
 const Me = ExtensionUtils.getCurrentExtension();
 
+// Import tool system
+const { ToolLoader } = Me.imports.tools.ToolLoader;
+
 // Initialize session for API requests
 const _httpSession = new Soup.Session();
 
-// Utility function to get focused window title (Wayland-compatible)
-function getFocusedWindowTitle() {
-    try {
-        const focusWindow = global.display.focus_window;
-        if (focusWindow && focusWindow.title) {
-            const appInfo = Shell.WindowTracker.get_default().get_window_app(focusWindow);
-            const appName = appInfo ? appInfo.get_name() : (focusWindow.get_wm_class() || 'Unknown');
-            return `${focusWindow.title} (${appName})`;
-        }
-        return "No Active Window";
-    } catch (error) {
-        log(`Error getting focused window title: ${error.message}`);
-        return "No Active Window";
-    }
-}
-
-// Utility to get the current workspace
-function getCurrentWorkspaceInfo() {
-    try {
-        if (!global.workspace_manager) {
-            log('Workspace manager not available');
-            return "Unknown Workspace";
-        }
-        
-        const workspaceManager = global.workspace_manager;
-        const activeWorkspace = workspaceManager.get_active_workspace();
-        if (!activeWorkspace) {
-            log('Active workspace not available');
-            return "Unknown Workspace";
-        }
-        
-        const workspaceIndex = activeWorkspace.index() + 1; // +1 for user-friendly numbering
-        const numWorkspaces = workspaceManager.get_n_workspaces();
-        
-        // Count windows on current workspace
-        let windowsOnWorkspace = 0;
-        try {
-            const windows = global.get_window_actors();
-            for (const actor of windows) {
-                const win = actor.get_meta_window();
-                if (win && win.get_workspace() === activeWorkspace) {
-                    windowsOnWorkspace++;
-                }
-            }
-        } catch (e) {
-            log(`Error counting windows: ${e.message}`);
-        }
-        
-        return `Workspace ${workspaceIndex} of ${numWorkspaces} (${windowsOnWorkspace} windows on current workspace)`;
-    } catch (error) {
-        log(`Error getting workspace info: ${error.message}`);
-        return "Unknown Workspace";
-    }
-}
-
-// Utility function to get selected text (Wayland and X11 compatible)
-// Using global.display.get_selection_owner and Shell.Global.get().get_primary_selection().get_text() which is more robust than other methods given Gnomes changes.
-function getSelectedText() {
-    try {
-        // Try primary selection first (most reliable in GNOME)
-        const selection = Shell.Global.get().get_primary_selection();
-        if (selection) {
-            const text = selection.get_text();
-            if (text) {
-                // Truncate if too long (more than 1000 chars)
-                const textStr = text.toString();
-                if (textStr.length > 1000) {
-                    return textStr.substring(0, 1000) + '... [truncated, total length: ' + textStr.length + ' chars]';
-                }
-                return textStr;
-            }
-        }
-        
-        // No selection found
-        return "";
-    } catch (error) {
-        log(`Error getting selected text: ${error.message}`);
-        return "";
-    }
-}
-
-// Utility function to get clipboard content (Wayland and X11 compatible)
-function getClipboardContent() {
-    try {
-        // Try St.Clipboard first (works in most GNOME versions)
-        const clipboard = St.Clipboard.get_default();
-        if (clipboard) {
-            let content = '';
-            clipboard.get_text(St.ClipboardType.CLIPBOARD, (clipboard, text) => {
-                if (text) content = text;
-            });
-            
-            // If we got content, return it (truncated if too long)
-            if (content) {
-                // Truncate if too long (more than 1000 chars)
-                if (content.length > 1000) {
-                    return content.substring(0, 1000) + '... [truncated, total length: ' + content.length + ' chars]';
-                }
-                return content;
-            }
-        }
-        
-        // Fallback to other methods if needed
-        return "";
-    } catch (error) {
-        log(`Error getting clipboard content: ${error.message}`);
-        return "";
-    }
-}
-
-// Utility to get a list of open windows (title and application)
-function getOpenWindows() {
-    try {
-        const windowList = [];
-        
-        // Try different methods to get windows
-        let windows = [];
-        try {
-            // Method 1: Using window actors
-            windows = global.get_window_actors().map(actor => actor.get_meta_window());
-        } catch (e) {
-            log(`Error with get_window_actors: ${e.message}`);
-            try {
-                // Method 2: Using display.list_windows
-                windows = global.display.list_windows(0); // 0 means all windows
-            } catch (e2) {
-                log(`Error with list_windows: ${e2.message}`);
-            }
-        }
-        
-        // Get active workspace
-        let activeWorkspace = null;
-        try {
-            activeWorkspace = global.workspace_manager.get_active_workspace();
-        } catch (e) {
-            log(`Error getting active workspace: ${e.message}`);
-        }
-        
-        // Process windows
-        for (const window of windows) {
-            try {
-                if (!window || !window.title || window.is_skip_taskbar()) {
-                    continue; // Skip invalid or taskbar-skipped windows
-                }
-                
-                const appInfo = Shell.WindowTracker.get_default().get_window_app(window);
-                const appName = appInfo ? appInfo.get_name() : (window.get_wm_class() || 'Unknown');
-                
-                let onCurrentWorkspace = false;
-                let workspaceIndex = -1;
-                
-                try {
-                    const windowWorkspace = window.get_workspace();
-                    if (windowWorkspace) {
-                        workspaceIndex = windowWorkspace.index() + 1;
-                        onCurrentWorkspace = (activeWorkspace && windowWorkspace === activeWorkspace);
-                    }
-                } catch (e) {
-                    log(`Error getting window workspace: ${e.message}`);
-                }
-                
-                windowList.push({
-                    title: window.title,
-                    application: appName,
-                    workspace: workspaceIndex,
-                    onCurrentWorkspace: onCurrentWorkspace,
-                    minimized: window.minimized
-                });
-            } catch (e) {
-                log(`Error processing window: ${e.message}`);
-            }
-        }
-        
-        return windowList;
-    } catch (error) {
-        log(`Error retrieving open window information: ${error.message}`);
-        return [];
-    }
-}
-
-// Utility function to get basic system info
-function getSystemInfo() {
-    const hostname = GLib.get_host_name();
-    const username = GLib.get_user_name();
-    const osName = GLib.get_os_info('PRETTY_NAME'); // Or use ID, VERSION_ID etc.
-    
-    // Get current date and time
-    let now = GLib.DateTime.new_now_local();
-    let dateTimeStr = now.format('%Y-%m-%d %H:%M:%S');
-    
-    // Get system memory information
-    let memInfo = "";
-    try {
-        let [success, contents] = GLib.file_get_contents('/proc/meminfo');
-        if (success) {
-            let memInfoStr = imports.byteArray.toString(contents);
-            let memTotal = memInfoStr.match(/MemTotal:\s+(\d+)/);
-            let memAvailable = memInfoStr.match(/MemAvailable:\s+(\d+)/);
-            
-            if (memTotal && memAvailable) {
-                let totalMB = Math.round(parseInt(memTotal[1]) / 1024);
-                let availableMB = Math.round(parseInt(memAvailable[1]) / 1024);
-                let usedMB = totalMB - availableMB;
-                let usagePercent = Math.round((usedMB / totalMB) * 100);
-                
-                memInfo = `Memory: ${usedMB}MB/${totalMB}MB (${usagePercent}% used)`;
-            }
-        }
-    } catch (error) {
-        log(`Error getting memory info: ${error}`);
-        memInfo = "Memory info unavailable";
-    }
-    
-    // Get CPU information
-    let cpuInfo = "";
-    try {
-        let [success, contents] = GLib.file_get_contents('/proc/cpuinfo');
-        if (success) {
-            let cpuInfoStr = imports.byteArray.toString(contents);
-            let modelName = cpuInfoStr.match(/model name\s+:\s+(.*)/);
-            let cpuCores = cpuInfoStr.match(/cpu cores\s+:\s+(\d+)/);
-            
-            if (modelName) {
-                cpuInfo = `CPU: ${modelName[1]}`;
-                if (cpuCores) {
-                    cpuInfo += ` (${cpuCores[1]} cores)`;
-                }
-            }
-        }
-    } catch (error) {
-        log(`Error getting CPU info: ${error}`);
-        cpuInfo = "CPU info unavailable";
-    }
-    
-    return `Hostname: ${hostname}, Username: ${username}, OS: ${osName}\nCurrent Time: ${dateTimeStr}\n${cpuInfo}\n${memInfo}`;
-}
-
-// Get CPU usage information
-function getCpuUsage() {
-    try {
-        // Use a more reliable method to get CPU usage
-        let [success, stdout, stderr, exitCode] = GLib.spawn_command_line_sync(
-            "grep -c ^processor /proc/cpuinfo"
-        );
-        
-        if (success && exitCode === 0) {
-            const cpuCount = parseInt(imports.byteArray.toString(stdout).trim());
-            
-            // Get CPU load averages
-            [success, stdout, stderr, exitCode] = GLib.spawn_command_line_sync("cat /proc/loadavg");
-            
-            if (success && exitCode === 0) {
-                const loadInfo = imports.byteArray.toString(stdout).trim().split(' ');
-                if (loadInfo.length >= 3) {
-                    const load1 = parseFloat(loadInfo[0]);
-                    const load5 = parseFloat(loadInfo[1]);
-                    const load15 = parseFloat(loadInfo[2]);
-                    
-                    const load1Percent = Math.min(100, Math.round((load1 / cpuCount) * 100));
-                    const load5Percent = Math.min(100, Math.round((load5 / cpuCount) * 100));
-                    
-                    return `CPU Load: ${load1Percent}% (1m), ${load5Percent}% (5m), Load Avg: ${load1.toFixed(2)}, ${load5.toFixed(2)}, ${load15.toFixed(2)}`;
-                }
-            }
-            
-            // Try another method using top if the first one fails
-            [success, stdout, stderr, exitCode] = GLib.spawn_command_line_sync(
-                "top -bn1 | grep '%Cpu' | awk '{print $2+$4}'"
-            );
-            
-            if (success && exitCode === 0) {
-                const cpuUsage = parseFloat(imports.byteArray.toString(stdout).trim());
-                if (!isNaN(cpuUsage)) {
-                    return `CPU Usage: ${cpuUsage.toFixed(1)}%`;
-                }
-            }
-        }
-        
-        // One more fallback method
-        [success, stdout, stderr, exitCode] = GLib.spawn_command_line_sync(
-            "vmstat 1 2 | tail -1 | awk '{print 100-$15}'"
-        );
-        
-        if (success && exitCode === 0) {
-            const cpuIdle = parseFloat(imports.byteArray.toString(stdout).trim());
-            if (!isNaN(cpuIdle)) {
-                return `CPU Usage: ${cpuIdle.toFixed(1)}%`;
-            }
-        }
-    } catch (error) {
-        log(`Error getting CPU usage: ${error.message}`);
-    }
-    
-    return "CPU Usage: Unknown";
-}
-
-// Get disk usage information
-function getDiskUsage() {
-    try {
-        // Get disk usage using GLib.spawn_command_line_sync
-        let [success, stdout, stderr, exitCode] = GLib.spawn_command_line_sync(
-            'df -h / --output=used,size,pcent'
-        );
-        
-        if (success && exitCode === 0) {
-            let output = imports.byteArray.toString(stdout);
-            let lines = output.split('\n');
-            
-            if (lines.length >= 2) {
-                let parts = lines[1].trim().split(/\s+/);
-                if (parts.length >= 3) {
-                    return `Disk Usage: ${parts[0]} / ${parts[1]} (${parts[2]})`;
-                }
-            }
-        }
-    } catch (error) {
-        log(`Error getting disk usage: ${error.message}`);
-    }
-    
-    return "Disk Usage: Unknown";
-}
-
-// Get top processes using the 'top' command directly
-function getTopProcesses(limit = 10) {
-    try {
-        log('Attempting to get top processes using top command...');
-        
-        // Use top in batch mode with a single iteration
-        let [success, stdout, stderr, exitCode] = GLib.spawn_command_line_sync(
-            'top -b -n 1 -o %CPU'
-        );
-        
-        if (success && exitCode === 0) {
-            let output = imports.byteArray.toString(stdout);
-            log('Top command successful, output length: ' + output.length);
-            
-            if (output.trim()) {
-                let lines = output.split('\n');
-                
-                // Find the line containing column headers (it starts with "PID")
-                let headerIndex = -1;
-                for (let i = 0; i < lines.length; i++) {
-                    if (lines[i].includes('PID') && lines[i].includes('USER') && lines[i].includes('COMMAND')) {
-                        headerIndex = i;
-                        break;
-                    }
-                }
-                
-                if (headerIndex !== -1) {
-                    // Process the lines after the header
-                    let processes = [];
-                    let processCount = 0;
-                    
-                    for (let i = headerIndex + 1; i < lines.length && processCount < limit; i++) {
-                        let line = lines[i].trim();
-                        if (!line) continue;
-                        
-                        // Split the line and extract the relevant information
-                        let parts = line.split(/\s+/);
-                        if (parts.length >= 12) {
-                            processCount++;
-                            processes.push({
-                                pid: parts[0],
-                                user: parts[1],
-                                // Extract CPU% and MEM% values
-                                cpu: parts[8] + '%',
-                                memory: parts[9] + '%',
-                                command: parts.slice(11).join(' ')
-                            });
-                        }
-                    }
-                    
-                    if (processes.length > 0) {
-                        log('Returning ' + processes.length + ' processes from top command');
-                        return processes;
-                    }
-                } else {
-                    log('Could not find header line in top output');
-                }
-            } else {
-                log('Top command returned empty output');
-            }
-        } else {
-            log('Top command failed with exit code: ' + exitCode + ', stderr: ' + imports.byteArray.toString(stderr));
-        }
-        
-        // Try a fallback - use ps command
-        log('Trying alternative ps command...');
-        [success, stdout, stderr, exitCode] = GLib.spawn_command_line_sync(
-            'ps -axo pid,user,%cpu,%mem,comm --sort=-%cpu | head -n ' + (limit + 1)
-        );
-        
-        if (success && exitCode === 0) {
-            let output = imports.byteArray.toString(stdout);
-            log('ps command successful, output length: ' + output.length);
-            
-            if (output.trim()) {
-                let lines = output.split('\n');
-                // Skip header line
-                let processes = [];
-                
-                for (let i = 1; i < Math.min(lines.length, limit + 1); i++) {
-                    let line = lines[i].trim();
-                    if (!line) continue;
-                    
-                    let parts = line.split(/\s+/);
-                    if (parts.length >= 5) {
-                        processes.push({
-                            pid: parts[0],
-                            user: parts[1],
-                            cpu: parts[2] + '%',
-                            memory: parts[3] + '%',
-                            command: parts[4]
-                        });
-                    }
-                }
-                
-                if (processes.length > 0) {
-                    log('Returning ' + processes.length + ' processes from ps command');
-                    return processes;
-                }
-            }
-        }
-    } catch (error) {
-        log(`Error getting top processes: ${error.message}`);
-    }
-    
-    log('Failed to get any processes, returning empty array');
-    return [];
-}
-
-// Get kernel and uptime information
-function getKernelAndUptime() {
-    try {
-        // Get kernel version
-        let [success1, stdout1, stderr1, exitCode1] = GLib.spawn_command_line_sync('uname -r');
-        
-        // Get uptime
-        let [success2, stdout2, stderr2, exitCode2] = GLib.spawn_command_line_sync('uptime -p');
-        
-        let kernelInfo = "";
-        if (success1 && exitCode1 === 0) {
-            kernelInfo += `Kernel: ${imports.byteArray.toString(stdout1).trim()}\n`;
-        }
-        
-        if (success2 && exitCode2 === 0) {
-            kernelInfo += `Uptime: ${imports.byteArray.toString(stdout2).trim()}`;
-        }
-        
-        return kernelInfo;
-    } catch (error) {
-        log(`Error getting kernel and uptime: ${error.message}`);
-        return "Kernel & Uptime: Unknown";
-    }
-}
-
-// Get detailed CPU information
-function getDetailedCpuInfo() {
-    try {
-        // Get CPU model, cores, threads
-        let [success, stdout, stderr, exitCode] = GLib.spawn_command_line_sync('lscpu');
-        
-        if (success && exitCode === 0) {
-            let output = imports.byteArray.toString(stdout);
-            let modelName = output.match(/Model name:\s+(.*)/);
-            let cpuCores = output.match(/Core\(s\) per socket:\s+(\d+)/);
-            let cpuThreads = output.match(/Thread\(s\) per core:\s+(\d+)/);
-            let cpuSockets = output.match(/Socket\(s\):\s+(\d+)/);
-            
-            let cpuInfo = "";
-            if (modelName) cpuInfo += `CPU Model: ${modelName[1].trim()}\n`;
-            
-            if (cpuCores && cpuThreads && cpuSockets) {
-                const cores = parseInt(cpuCores[1]);
-                const threads = parseInt(cpuThreads[1]);
-                const sockets = parseInt(cpuSockets[1]);
-                cpuInfo += `CPU Cores: ${cores * sockets}, Threads: ${cores * threads * sockets}\n`;
-            }
-            
-            return cpuInfo;
-        }
-    } catch (error) {
-        log(`Error getting detailed CPU info: ${error.message}`);
-    }
-    
-    return "";
-}
-
-// Get GPU information
-function getGpuInfo() {
-    try {
-        // Try lspci first for GPU info
-        let [success, stdout, stderr, exitCode] = GLib.spawn_command_line_sync(
-            "lspci | grep -i 'vga\\|3d\\|2d'"
-        );
-        
-        if (success && exitCode === 0) {
-            let output = imports.byteArray.toString(stdout);
-            if (output.trim()) {
-                // Extract just the device name, not the PCI info
-                let gpus = output.split('\n')
-                    .filter(line => line.trim())
-                    .map(line => {
-                        let match = line.match(/:\s+(.*)/);
-                        return match ? match[1].trim() : line.trim();
-                    });
-                
-                if (gpus.length > 0) {
-                    return `GPU: ${gpus.join(', ')}`;
-                }
-            }
-        }
-        
-        // Fallback to glxinfo if available
-        [success, stdout, stderr, exitCode] = GLib.spawn_command_line_sync(
-            "glxinfo | grep 'OpenGL renderer'"
-        );
-        
-        if (success && exitCode === 0) {
-            let output = imports.byteArray.toString(stdout);
-            let match = output.match(/OpenGL renderer string:\s+(.*)/);
-            if (match) {
-                return `GPU: ${match[1].trim()}`;
-            }
-        }
-    } catch (error) {
-        log(`Error getting GPU info: ${error.message}`);
-    }
-    
-    return "GPU: Unknown";
-}
-
-// Get current running applications
-function getRunningApps() {
-    try {
-        const appSystem = Shell.AppSystem.get_default();
-        const runningApps = appSystem.get_running();
-        
-        if (runningApps.length > 0) {
-            let appList = [];
-            runningApps.forEach(app => {
-                try {
-                    appList.push({
-                        name: app.get_name(),
-                        id: app.get_id(),
-                        windows: app.get_windows().length
-                    });
-                } catch (e) {
-                    log(`Error processing app: ${e.message}`);
-                }
-            });
-            
-            return appList;
-        }
-    } catch (error) {
-        log(`Error getting running apps: ${error.message}`);
-    }
-    
-    return [];
-}
-
-// Get network information
-function getNetworkInfo() {
-    try {
-        // Try simplified approach first (works on more systems)
-        let [success, stdout, stderr, exitCode] = GLib.spawn_command_line_sync(
-            "ip -4 addr show scope global | grep inet | awk '{print $NF, $2}'"
-        );
-        
-        if (success && exitCode === 0 && imports.byteArray.toString(stdout).trim()) {
-            let output = imports.byteArray.toString(stdout);
-            let lines = output.trim().split('\n');
-            
-            if (lines.length > 0) {
-                let networkInfo = "Network Interfaces:\n";
-                lines.forEach(line => {
-                    let parts = line.trim().split(/\s+/);
-                    if (parts.length >= 2) {
-                        networkInfo += `  - ${parts[0]}: ${parts[1]}\n`;
-                    }
-                });
-                return networkInfo;
-            }
-        }
-        
-        // Fallback to ifconfig if available
-        [success, stdout, stderr, exitCode] = GLib.spawn_command_line_sync(
-            "ifconfig | grep 'inet ' | grep -v '127.0.0.1' | awk '{print $1, $2}'"
-        );
-        
-        if (success && exitCode === 0 && imports.byteArray.toString(stdout).trim()) {
-            let output = imports.byteArray.toString(stdout);
-            let lines = output.trim().split('\n');
-            
-            if (lines.length > 0) {
-                let networkInfo = "Network Interfaces:\n";
-                lines.forEach(line => {
-                    let parts = line.trim().split(/\s+/);
-                    if (parts.length >= 2) {
-                        networkInfo += `  - ${parts[1]}\n`;
-                    }
-                });
-                return networkInfo;
-            }
-        }
-    } catch (error) {
-        log(`Error getting network info: ${error.message}`);
-    }
-    
-    return "Network Info: Unavailable";
-}
+// Initialize tool loader
+const toolLoader = new ToolLoader();
+toolLoader.loadTools();
 
 class ShellController {
     constructor() {
@@ -1118,20 +513,240 @@ class ProviderAdapter {
     // Common interface for all providers
     async makeRequest(text, toolCalls = null) {
         const provider = this._settings.get_string('service-provider');
-        switch (provider) {
-            case 'openai':
-                return this._makeOpenAIRequest(text, toolCalls);
-            case 'gemini':
-                return this._makeGeminiRequest(text, toolCalls);
-            case 'anthropic':
-                return this._makeAnthropicRequest(text, toolCalls);
-            case 'llama':
-                return this._makeLlamaRequest(text, toolCalls);
-            case 'ollama':
-                return this._makeOllamaRequest(text, toolCalls);
-            default:
-                throw new Error(`Unknown provider: ${provider}`);
+        log(`Making request to provider: ${provider}, tool calling: ${toolCalls ? 'enabled' : 'disabled'}`);
+        
+        try {
+            let response;
+            switch (provider) {
+                case 'openai':
+                    response = await this._makeOpenAIRequest(text, toolCalls);
+                    break;
+                case 'gemini':
+                    response = await this._makeGeminiRequest(text, toolCalls);
+                    break;
+                case 'anthropic':
+                    response = await this._makeAnthropicRequest(text, toolCalls);
+                    break;
+                case 'llama':
+                    response = await this._makeLlamaRequest(text, toolCalls);
+                    break;
+                case 'ollama':
+                    response = await this._makeOllamaRequest(text, toolCalls);
+                    break;
+                default:
+                    throw new Error(`Unknown provider: ${provider}`);
+            }
+            
+            return response;
+        } catch (error) {
+            log(`Error in makeRequest: ${error.message}`);
+            throw error;
         }
+    }
+
+    // Shared tool processing methods
+    _extractToolCalls(text) {
+        log('Attempting to extract tool calls from response...');
+        let toolCalls = [];
+        let remainingText = text;
+
+        // Try multiple approaches to extract JSON
+        let jsonMatches = [];
+        
+        try {
+            // 1. Try specific pattern for tool call JSON
+            const specificPattern = /\{"tool"\s*:\s*"[^"]+"\s*,\s*"arguments"\s*:\s*\{[^}]*\}\}/g;
+            const specificMatches = text.match(specificPattern) || [];
+            
+            if (specificMatches.length > 0) {
+                log(`Found ${specificMatches.length} potential tool call objects with specific pattern`);
+                
+                for (const match of specificMatches) {
+                    try {
+                        const parsed = JSON.parse(match);
+                        if (parsed.tool && parsed.arguments) {
+                            jsonMatches.push({
+                                parsed,
+                                match
+                            });
+                            log(`Found valid tool call JSON with specific pattern: ${match}`);
+                        }
+                    } catch (e) {
+                        log(`Failed to parse specific pattern JSON: ${e.message}`);
+                    }
+                }
+            }
+
+            // 2. Try XML-style tool_call tags
+            if (jsonMatches.length === 0) {
+                const toolCallXmlMatch = text.match(/<tool_call>([\s\S]*?)<\/tool_call>/);
+                if (toolCallXmlMatch) {
+                    try {
+                        const parsed = JSON.parse(toolCallXmlMatch[1]);
+                        if (parsed.tool && parsed.arguments) {
+                            jsonMatches.push({
+                                parsed,
+                                match: toolCallXmlMatch[0]
+                            });
+                            log(`Found valid tool call in XML tags: ${toolCallXmlMatch[1]}`);
+                        }
+                    } catch (e) {
+                        log(`Failed to parse XML tool call: ${e.message}`);
+                    }
+                }
+            }
+
+            // 3. Try code blocks with JSON
+            if (jsonMatches.length === 0) {
+                const codeBlockMatch = text.match(/```(?:json)?\s*([\s\S]*?)```/);
+                if (codeBlockMatch) {
+                    try {
+                        const parsed = JSON.parse(codeBlockMatch[1].trim());
+                        if (parsed.tool && parsed.arguments) {
+                            jsonMatches.push({
+                                parsed,
+                                match: codeBlockMatch[0]
+                            });
+                            log(`Found valid tool call in code block: ${codeBlockMatch[1]}`);
+                        }
+                    } catch (e) {
+                        log(`Failed to parse code block JSON: ${e.message}`);
+                    }
+                }
+            }
+
+            // Process found matches
+            if (jsonMatches.length > 0) {
+                const { parsed, match } = jsonMatches[0];
+                log(`Processing tool call: ${parsed.tool} with arguments: ${JSON.stringify(parsed.arguments)}`);
+                
+                toolCalls = [{
+                    function: {
+                        name: parsed.tool,
+                        arguments: JSON.stringify(parsed.arguments)
+                    }
+                }];
+                
+                // Remove the tool call from the text
+                remainingText = text.replace(match, '').trim();
+                log(`Remaining text after removing tool call: ${remainingText.substring(0, 100)}...`);
+            }
+        } catch (error) {
+            log(`Error in tool call extraction: ${error.message}`);
+        }
+
+        return { toolCalls, remainingText };
+    }
+
+    _processToolResponse(response) {
+        log(`Processing response for tool calls: ${JSON.stringify(response)}`);
+        let text = '';
+        let toolCalls = [];
+
+        try {
+            // Handle different response formats
+            if (response.choices && response.choices[0]) {
+                const message = response.choices[0].message;
+                if (message) {
+                    text = message.content || '';
+                    
+                    // Check for function calls in OpenAI format
+                    if (message.function_call) {
+                        toolCalls = [{
+                            function: {
+                                name: message.function_call.name,
+                                arguments: message.function_call.arguments
+                            }
+                        }];
+                    }
+                    // If no function calls found, try extracting from content
+                    else if (text) {
+                        const extracted = this._extractToolCalls(text);
+                        toolCalls = extracted.toolCalls;
+                        text = extracted.remainingText;
+                    }
+                }
+            } else if (response.response) {
+                // Handle Ollama-style response
+                text = response.response;
+                const extracted = this._extractToolCalls(text);
+                toolCalls = extracted.toolCalls;
+                text = extracted.remainingText;
+            }
+        } catch (error) {
+            log(`Error processing tool response: ${error.message}`);
+        }
+
+        log(`Processed response - text length: ${text.length}, tool calls: ${toolCalls.length}`);
+        return { text, toolCalls };
+    }
+
+    // Update LlamaCPP request method to use shared processing
+    _makeLlamaRequest(text, toolCalls) {
+        const serverUrl = this._settings.get_string('llama-server-url');
+        if (!serverUrl) {
+            throw new Error('Llama server URL is not set');
+        }
+
+        const modelName = this._settings.get_string('llama-model-name') || 'llama';
+        const temperature = this._settings.get_double('llama-temperature');
+
+        // Create the system message with tool instructions
+        const systemMessage = {
+            role: 'system',
+            content: this._getToolSystemPrompt()
+        };
+
+        // Create the user message
+        const userMessage = {
+            role: 'user',
+            content: text
+        };
+
+        // Prepare the request data
+        const requestData = {
+            model: modelName,
+            messages: [systemMessage, userMessage],
+            max_tokens: Math.round(this._settings.get_int('max-response-length') / 4),
+            temperature: temperature,
+            stream: false
+        };
+
+        // Add tools if tool calling is enabled
+        if (toolCalls) {
+            const tools = toolLoader.getToolsAsSchemaArray();
+            requestData.functions = tools;
+            requestData.function_call = 'auto';
+        }
+
+        log(`Making Llama request with data: ${JSON.stringify(requestData)}`);
+
+        const message = Soup.Message.new('POST', `${serverUrl}/v1/chat/completions`);
+        message.request_headers.append('Content-Type', 'application/json');
+        message.set_request_body_from_bytes('application/json', new GLib.Bytes(JSON.stringify(requestData)));
+
+        return new Promise((resolve, reject) => {
+            _httpSession.queue_message(message, (session, msg) => {
+                if (msg.status_code !== 200) {
+                    const errorMsg = `Llama API error: ${msg.status_code} - ${msg.reason_phrase}`;
+                    log(errorMsg);
+                    reject(errorMsg);
+                    return;
+                }
+
+                try {
+                    const response = JSON.parse(msg.response_body.data);
+                    log(`Received Llama response: ${JSON.stringify(response)}`);
+                    
+                    // Use shared processing method
+                    const processed = this._processToolResponse(response);
+                    resolve(processed);
+                } catch (error) {
+                    log(`Error processing Llama response: ${error.message}`);
+                    reject(`Error processing Llama response: ${error.message}`);
+                }
+            });
+        });
     }
 
     // Provider-specific request implementations
@@ -1152,7 +767,7 @@ class ProviderAdapter {
         };
 
         if (toolCalls) {
-            requestData.tools = toolCalls;
+            requestData.tools = toolLoader.getToolsAsSchemaArray();
             requestData.tool_choice = "auto";
         }
 
@@ -1257,106 +872,6 @@ class ProviderAdapter {
         });
     }
 
-    _makeLlamaRequest(text, toolCalls) {
-        const serverUrl = this._settings.get_string('llama-server-url');
-        if (!serverUrl) {
-            throw new Error('Llama server URL is not set');
-        }
-
-        const modelName = this._settings.get_string('llama-model-name') || 'llama';
-        const temperature = this._settings.get_double('llama-temperature');
-
-        // Create the system message with tool instructions
-        const systemMessage = {
-            role: 'system',
-            content: this._getToolSystemPrompt()
-        };
-
-        // Create the user message
-        const userMessage = {
-            role: 'user',
-            content: text
-        };
-
-        // Prepare the request data
-        const requestData = {
-            model: modelName,
-            messages: [systemMessage, userMessage],
-            max_tokens: Math.round(this._settings.get_int('max-response-length') / 4),
-            temperature: temperature,
-            stream: false
-        };
-
-        // Add tools if tool calling is enabled
-        if (toolCalls) {
-            requestData.tools = this._availableTools;
-            requestData.tool_choice = "auto";
-        }
-
-        log(`Making Llama request with data: ${JSON.stringify(requestData)}`);
-
-        const message = Soup.Message.new('POST', `${serverUrl}/v1/chat/completions`);
-        message.request_headers.append('Content-Type', 'application/json');
-        message.set_request_body_from_bytes('application/json', new GLib.Bytes(JSON.stringify(requestData)));
-
-        return new Promise((resolve, reject) => {
-            _httpSession.queue_message(message, (session, msg) => {
-                if (msg.status_code !== 200) {
-                    const errorMsg = `Llama API error: ${msg.status_code} - ${msg.reason_phrase}`;
-                    log(errorMsg);
-                    reject(errorMsg);
-                    return;
-                }
-
-                try {
-                    const response = JSON.parse(msg.response_body.data);
-                    log(`Received Llama response: ${JSON.stringify(response)}`);
-
-                    if (!response.choices || !response.choices[0] || !response.choices[0].message) {
-                        throw new Error('Invalid response format from Llama API');
-                    }
-
-                    const message = response.choices[0].message;
-                    let text = message.content || '';
-                    let toolCalls = [];
-
-                    // Check for tool calls in the response
-                    if (toolCalls) {
-                        // Look for tool calls in both formats
-                        const toolCallMatch = text.match(/<tool_call>([\s\S]*?)<\/tool_call>/) || 
-                                           text.match(/<([^>]+)>([\s\S]*?)<\/\1>/);
-                        
-                        if (toolCallMatch) {
-                            try {
-                                const toolCallData = JSON.parse(toolCallMatch[2] || toolCallMatch[1]);
-                                log(`Parsed tool call data: ${JSON.stringify(toolCallData)}`);
-                                
-                                toolCalls = [{
-                                    function: {
-                                        name: toolCallData.name,
-                                        arguments: JSON.stringify(toolCallData.arguments || {})
-                                    }
-                                }];
-                                
-                                // Remove the tool call from the text
-                                text = text.replace(/<tool_call>[\s\S]*?<\/tool_call>/, '').trim();
-                                text = text.replace(/<[^>]+>[\s\S]*?<\/[^>]+>/, '').trim();
-                                log(`Text after removing tool call: ${text}`);
-                            } catch (e) {
-                                log(`Error parsing tool call: ${e.message}`);
-                            }
-                        }
-                    }
-
-                    resolve({ text, toolCalls });
-                } catch (error) {
-                    log(`Error processing Llama response: ${error.message}`);
-                    reject(`Error processing Llama response: ${error.message}`);
-                }
-            });
-        });
-    }
-
     _makeOllamaRequest(text, toolCalls) {
         const serverUrl = this._settings.get_string('ollama-server-url');
         if (!serverUrl) {
@@ -1366,7 +881,9 @@ class ProviderAdapter {
         const modelName = this._settings.get_string('ollama-model-name') || 'llama2';
         const temperature = this._settings.get_double('ollama-temperature');
 
-        const requestData = {
+        // For Ollama, we need to use their chat API which has better support for tools
+        let requestUrl = `${serverUrl}/api/generate`;
+        let requestData = {
             model: modelName,
             prompt: text,
             stream: false,
@@ -1375,89 +892,93 @@ class ProviderAdapter {
             }
         };
 
+        // If tool calls are enabled, use the chat API format instead
         if (toolCalls) {
-            requestData.tools = toolCalls;
-            requestData.tool_choice = "auto";
-            requestData.system = this._getToolSystemPrompt();
+            // Add system message with tool instructions at the beginning of the prompt
+            const toolSystemPrompt = this._getToolSystemPrompt();
+            requestData.prompt = `${toolSystemPrompt}\n\nUser: ${text}`;
+            
+            log(`Making Ollama request with tool support. Model: ${modelName}, temp: ${temperature}`);
         }
 
-        const message = Soup.Message.new('POST', `${serverUrl}/api/generate`);
+        log(`Sending request to Ollama: ${requestUrl}`);
+        const message = Soup.Message.new('POST', requestUrl);
         message.request_headers.append('Content-Type', 'application/json');
         message.set_request_body_from_bytes('application/json', new GLib.Bytes(JSON.stringify(requestData)));
 
         return new Promise((resolve, reject) => {
             _httpSession.queue_message(message, (session, msg) => {
                 if (msg.status_code !== 200) {
-                    reject(`Ollama API error: ${msg.status_code}`);
+                    const errorMsg = `Ollama API error: ${msg.status_code}`;
+                    log(errorMsg);
+                    reject(errorMsg);
                     return;
                 }
                 try {
+                    log('Received response from Ollama, parsing...');
                     const response = JSON.parse(msg.response_body.data);
-                    let text = response.response || '';
-                    let toolCalls = [];
-
-                    if (toolCalls) {
-                        const toolCallMatch = text.match(/<tool_call>([\s\S]*?)<\/tool_call>/);
-                        if (toolCallMatch) {
-                            try {
-                                const toolCallData = JSON.parse(toolCallMatch[1]);
-                                toolCalls = [{
-                                    function: {
-                                        name: toolCallData.name,
-                                        arguments: JSON.stringify(toolCallData.arguments)
-                                    }
-                                }];
-                                text = text.replace(/<tool_call>[\s\S]*?<\/tool_call>/, '').trim();
-                            } catch (e) {
-                                log(`Error parsing tool call: ${e.message}`);
-                            }
-                        }
-                    }
-
-                    resolve({ text, toolCalls });
+                    
+                    // Use shared processing method
+                    const processed = this._processToolResponse(response);
+                    resolve(processed);
                 } catch (error) {
-                    reject(`Error parsing Ollama response: ${error.message}`);
+                    const errorMsg = `Error parsing Ollama response: ${error.message}`;
+                    log(errorMsg);
+                    reject(errorMsg);
                 }
             });
         });
     }
 
     _getToolSystemPrompt() {
-        return `You are a helpful AI assistant with access to system tools. 
-When a user asks for information that can be obtained using tools (like time, system info, etc.), 
-you MUST use the appropriate tool to get accurate information.
+        // Get the formatted tool descriptions from all loaded tools
+        const toolsArray = toolLoader.getTools();
+        const toolDescriptions = toolsArray.map(tool => {
+            return `Tool: ${tool.name}
+Description: ${tool.description}
+Category: ${tool.category}
+Parameters: ${JSON.stringify(tool.parameters, null, 2)}`;
+        }).join('\n\n');
 
-Available Tools:
-1. get_current_time - Get the current system time
-2. get_current_date - Get the current system date
-3. switch_workspace - Switch to a different workspace (requires workspace_number)
-4. minimize_all_windows - Minimize all windows on the current workspace
-5. maximize_current_window - Maximize the currently focused window
-6. arrange_windows - Arrange windows in a grid pattern (requires rows and columns)
-7. launch_application - Launch an application (requires app_id)
-8. toggle_night_light - Toggle the night light feature
-9. move_window - Move the currently focused window (requires x and y coordinates)
-10. resize_window - Resize the currently focused window (requires width and height)
-11. close_current_window - Close the currently focused window
-12. create_workspace - Create a new workspace
-13. remove_workspace - Remove a workspace (requires workspace_number)
-14. list_installed_apps - List all installed applications
-15. get_running_apps - Get list of currently running applications
-16. set_brightness - Set the screen brightness level (requires level 0-100)
-17. set_volume - Set the system volume level (requires level 0-100)
-18. web_search - Search the internet for information (requires query)
-19. fetch_url_content - Fetch and extract the main content from a specific URL (requires url)
+        // Return the formatted prompt with general guidance to prevent loops
+        return `You are a helpful assistant that has access to tools. You must understand when to use these tools to respond to user queries.
 
-To use a tool, you must respond in this exact format:
-<tool_call>
+Available tools:
+
+${toolDescriptions}
+
+TOOL USAGE INSTRUCTIONS - FOLLOW THESE EXACTLY:
+
+1. When a user asks something that requires a tool, you MUST respond ONLY with a valid JSON object in this format:
 {
-    "name": "tool_name",
+    "tool": "tool_name",
     "arguments": {
         "param1": "value1",
         "param2": "value2"
     }
 }
-</tool_call>`;
+
+2. Do NOT include ANY explanatory text, markdown, or code formatting when using a tool.
+3. Do NOT include backticks (\`\`\`) or any other text before or after the JSON.
+4. ONLY output the raw JSON object - nothing else.
+5. Make sure your JSON is valid and properly formatted.
+
+IMPORTANT LOOP PREVENTION GUIDELINES:
+
+1. DO NOT request the same tool with the same arguments twice in a row.
+2. After receiving tool results, prioritize providing a natural language response over making additional tool calls.
+3. Only request additional tools when you genuinely need more information that wasn't provided in the first result.
+4. You are limited to 10 tool calls per conversation chain.
+
+EXAMPLES:
+
+To get the current time:
+{"tool": "time_date", "arguments": {"action": "get_current_time"}}
+
+To search the web:
+{"tool": "web_search", "arguments": {"query": "latest news about AI", "engine": "google"}}
+
+If not using a tool, respond conversationally as you normally would.`;
     }
 }
 
@@ -1472,6 +993,12 @@ class LLMChatBox {
         this._lastSearchResults = null; // Store last search results for the current session
         this._lastSearchQuery = null;
         this._lastSearchUrls = new Map(); // Store URLs with their titles for reference
+        
+        // Add tool call tracking for loop protection
+        this._toolCallCount = 0;
+        this._maxToolCalls = 10; // Maximum number of tool calls in a single conversation chain
+        this._recentToolCalls = []; // Store recent tool calls to detect loops
+        this._maxRecentToolCalls = 5; // Number of recent tool calls to track for loop detection
         
         // Create main container
         this.actor = new St.BoxLayout({
@@ -1598,247 +1125,8 @@ class LLMChatBox {
         // Add tool calling state
         this._toolCallingEnabled = false;
         
-        // Define available tools
-        this._availableTools = [
-            {
-                name: "switch_workspace",
-                description: "Switch to a different workspace",
-                parameters: {
-                    type: "object",
-                    properties: {
-                        workspace_number: {
-                            type: "integer",
-                            description: "The workspace number to switch to (1-based index)"
-                        }
-                    },
-                    required: ["workspace_number"]
-                }
-            },
-            {
-                name: "minimize_all_windows",
-                description: "Minimize all windows on the current workspace",
-                parameters: {
-                    type: "object",
-                    properties: {}
-                }
-            },
-            {
-                name: "maximize_current_window",
-                description: "Maximize the currently focused window",
-                parameters: {
-                    type: "object",
-                    properties: {}
-                }
-            },
-            {
-                name: "arrange_windows",
-                description: "Arrange windows in a grid pattern",
-                parameters: {
-                    type: "object",
-                    properties: {
-                        rows: {
-                            type: "integer",
-                            description: "Number of rows in the grid"
-                        },
-                        columns: {
-                            type: "integer",
-                            description: "Number of columns in the grid"
-                        }
-                    },
-                    required: ["rows", "columns"]
-                }
-            },
-            {
-                name: "launch_application",
-                description: "Launch an application",
-                parameters: {
-                    type: "object",
-                    properties: {
-                        app_id: {
-                            type: "string",
-                            description: "The application ID or name to launch"
-                        }
-                    },
-                    required: ["app_id"]
-                }
-            },
-            {
-                name: "toggle_night_light",
-                description: "Toggle the night light feature",
-                parameters: {
-                    type: "object",
-                    properties: {}
-                }
-            },
-            {
-                name: "move_window",
-                description: "Move the currently focused window to a specific position",
-                parameters: {
-                    type: "object",
-                    properties: {
-                        x: {
-                            type: "integer",
-                            description: "X coordinate for the window position"
-                        },
-                        y: {
-                            type: "integer",
-                            description: "Y coordinate for the window position"
-                        }
-                    },
-                    required: ["x", "y"]
-                }
-            },
-            {
-                name: "resize_window",
-                description: "Resize the currently focused window",
-                parameters: {
-                    type: "object",
-                    properties: {
-                        width: {
-                            type: "integer",
-                            description: "New width for the window"
-                        },
-                        height: {
-                            type: "integer",
-                            description: "New height for the window"
-                        }
-                    },
-                    required: ["width", "height"]
-                }
-            },
-            {
-                name: "close_current_window",
-                description: "Close the currently focused window",
-                parameters: {
-                    type: "object",
-                    properties: {}
-                }
-            },
-            {
-                name: "create_workspace",
-                description: "Create a new workspace",
-                parameters: {
-                    type: "object",
-                    properties: {}
-                }
-            },
-            {
-                name: "remove_workspace",
-                description: "Remove a workspace",
-                parameters: {
-                    type: "object",
-                    properties: {
-                        workspace_number: {
-                            type: "integer",
-                            description: "The workspace number to remove (1-based index)"
-                        }
-                    },
-                    required: ["workspace_number"]
-                }
-            },
-            {
-                name: "get_current_time",
-                description: "Get the current system time",
-                parameters: {
-                    type: "object",
-                    properties: {}
-                }
-            },
-            {
-                name: "get_current_date",
-                description: "Get the current system date",
-                parameters: {
-                    type: "object",
-                    properties: {}
-                }
-            },
-            {
-                name: "list_installed_apps",
-                description: "List all installed applications",
-                parameters: {
-                    type: "object",
-                    properties: {}
-                }
-            },
-            {
-                name: "get_running_apps",
-                description: "Get list of currently running applications",
-                parameters: {
-                    type: "object",
-                    properties: {}
-                }
-            },
-            {
-                name: "set_brightness",
-                description: "Set the screen brightness level",
-                parameters: {
-                    type: "object",
-                    properties: {
-                        level: {
-                            type: "integer",
-                            description: "Brightness level (0-100)"
-                        }
-                    },
-                    required: ["level"]
-                }
-            },
-            {
-                name: "set_volume",
-                description: "Set the system volume level",
-                parameters: {
-                    type: "object",
-                    properties: {
-                        level: {
-                            type: "integer",
-                            description: "Volume level (0-100)"
-                        }
-                    },
-                    required: ["level"]
-                }
-            },
-            {
-                name: "web_search",
-                description: "Search the internet for information",
-                parameters: {
-                    type: "object",
-                    properties: {
-                        query: {
-                            type: "string",
-                            description: "The search query to look up on the internet"
-                        }
-                    },
-                    required: ["query"]
-                }
-            },
-            {
-                name: "fetch_url_content",
-                description: "Fetch and extract the main content from a specific URL",
-                parameters: {
-                    type: "object",
-                    properties: {
-                        url: {
-                            type: "string",
-                            description: "The URL to fetch content from"
-                        }
-                    },
-                    required: ["url"]
-                }
-            },
-            {
-                name: "get_system_context",
-                description: "Get detailed information about the current system state including hardware, running processes, open windows, and more",
-                parameters: {
-                    type: "object",
-                    properties: {
-                        detail_level: {
-                            type: "string",
-                            description: "Level of detail to include: 'basic', 'standard', or 'detailed'",
-                            enum: ["basic", "standard", "detailed"]
-                        }
-                    }
-                }
-            }
-        ];
+        // Replace hardcoded tools with the ones loaded from the ToolLoader
+        this._availableTools = toolLoader.getToolsAsSchemaArray();
 
         // Add tool calling toggle button
         this._toolCallingToggleButton = new St.Button({
@@ -1903,6 +1191,11 @@ class LLMChatBox {
         };
 
         this._providerAdapter = new ProviderAdapter(settings);
+
+        // Replace old tool system with new one
+        this.toolLoader = new ToolLoader();
+        this.toolLoader.loadTools();
+        this.tools = this.toolLoader.getTools();
     }
 
     _onEntryActivated() {
@@ -1937,108 +1230,50 @@ class LLMChatBox {
     }
 
     _executeToolCall(toolCall) {
-        log(`Executing tool call: ${toolCall.name}`);
         try {
-            switch (toolCall.name) {
-                case 'web_search':
-                    return this._shellController.searchWeb(toolCall.arguments.query);
-                
-                case 'fetch_url_content':
-                    // Check if we have the URL from previous search results
-                    const title = toolCall.arguments.title;
-                    let url = toolCall.arguments.url;
-                    
-                    if (title && this._lastSearchUrls.has(title)) {
-                        url = this._lastSearchUrls.get(title);
-                        log(`Found URL for title "${title}": ${url}`);
-                    }
-                    
-                    if (!url) {
-                        throw new Error('No URL provided or found in search results');
-                    }
-                    
-                    return this._shellController.fetchUrlContent(url);
-                
-                case 'get_system_context':
-                    const detailLevel = toolCall.arguments.detail_level || 'standard';
-                    return this._prepareContext(detailLevel);
-                
-                case 'switch_workspace':
-                    return this._shellController.switchWorkspace(toolCall.arguments.workspace_number);
-                
-                case 'minimize_all_windows':
-                    return this._shellController.minimizeAllWindows();
-                
-                case 'maximize_current_window':
-                    return this._shellController.maximizeCurrentWindow();
-                
-                case 'arrange_windows':
-                    return this._shellController.arrangeWindowsInGrid(
-                        toolCall.arguments.rows,
-                        toolCall.arguments.columns
-                    );
-                
-                case 'launch_application':
-                    return this._shellController.launchApplication(toolCall.arguments.app_id);
-                
-                case 'toggle_night_light':
-                    return this._shellController.toggleNightLight();
-                
-                case 'move_window':
-                    return this._shellController.moveWindow(
-                        toolCall.arguments.x,
-                        toolCall.arguments.y
-                    );
-                
-                case 'resize_window':
-                    return this._shellController.resizeWindow(
-                        toolCall.arguments.width,
-                        toolCall.arguments.height
-                    );
-                
-                case 'close_current_window':
-                    return this._shellController.closeCurrentWindow();
-                
-                case 'create_workspace':
-                    return this._shellController.createWorkspace();
-                
-                case 'remove_workspace':
-                    return this._shellController.removeWorkspace(
-                        toolCall.arguments.workspace_number
-                    );
-                
-                case 'get_current_time':
-                    const time = this._shellController.getCurrentTime();
-                    return time ? `Current time: ${time}` : 'Failed to get current time';
-                
-                case 'get_current_date':
-                    const date = this._shellController.getCurrentDate();
-                    return date ? `Current date: ${date}` : 'Failed to get current date';
-                
-                case 'list_installed_apps':
-                    const apps = this._shellController.listInstalledApps();
-                    return apps.length > 0 ? 
-                        `Installed apps:\n${apps.map(app => `- ${app.name} (${app.id})`).join('\n')}` :
-                        'No installed apps found';
-                
-                case 'get_running_apps':
-                    const runningApps = this._shellController.getRunningApps();
-                    return runningApps.length > 0 ?
-                        `Running apps:\n${runningApps.map(app => `- ${app.name} (${app.windows} windows)`).join('\n')}` :
-                        'No running apps found';
-                
-                case 'set_brightness':
-                    return this._shellController.setBrightness(toolCall.arguments.level);
-                
-                case 'set_volume':
-                    return this._shellController.setVolume(toolCall.arguments.level);
-                
-                default:
-                    throw new Error(`Unknown tool call: ${toolCall.name}`);
+            log(`Executing tool call: name=${toolCall.name}, arguments=${JSON.stringify(toolCall.arguments)}`);
+            
+            const tool = this.toolLoader.getTool(toolCall.name);
+            if (!tool) {
+                const errorMsg = `Tool ${toolCall.name} not found`;
+                log(errorMsg);
+                return { error: errorMsg };
             }
+            
+            log(`Found tool: ${tool.name}, category=${tool.category}`);
+            
+            // Ensure arguments is an object
+            let args = toolCall.arguments;
+            if (typeof args === 'string') {
+                try {
+                    args = JSON.parse(args);
+                    log(`Parsed arguments string into object: ${JSON.stringify(args)}`);
+                } catch (e) {
+                    log(`Could not parse arguments string, using as-is: ${e.message}`);
+                }
+            }
+            
+            log(`Executing tool with arguments: ${JSON.stringify(args)}`);
+            const result = tool.execute(args);
+            
+            if (result instanceof Promise) {
+                log('Tool returned a Promise, waiting for result...');
+                return result.then(r => {
+                    log(`Promise resolved with result: ${JSON.stringify(r)}`);
+                    return r;
+                }).catch(e => {
+                    const errorMsg = `Error in Promise execution: ${e.message}`;
+                    log(errorMsg);
+                    return { error: errorMsg };
+                });
+            }
+            
+            log(`Tool execution complete, result: ${JSON.stringify(result)}`);
+            return result;
         } catch (error) {
-            log(`Error executing tool call ${toolCall.name}: ${error.message}`);
-            throw error;
+            const errorMsg = `Error executing tool: ${error.message}`;
+            log(errorMsg);
+            return { error: errorMsg };
         }
     }
 
@@ -2049,6 +1284,11 @@ class LLMChatBox {
         // Clear input
         this._entryText.set_text('');
 
+        // Reset tool call tracking between user messages
+        // This allows fresh tool calls for each new user query
+        this._toolCallCount = 0;
+        this._recentToolCalls = [];
+        
         // Add user message
         this._addMessage(message, 'user');
 
@@ -2067,39 +1307,158 @@ class LLMChatBox {
             return;
         }
 
-        // Construct the full prompt with just conversation history
+        // Construct the full prompt with conversation history
         const fullPrompt = history + message;
+        
+        // Log the tool calling state and available tools
+        if (this._toolCallingEnabled) {
+            log(`Tool calling enabled. Available tools: ${this.toolLoader.getTools().length}`);
+        }
 
         // Make the API request using the provider adapter
-        this._providerAdapter.makeRequest(fullPrompt, this._toolCallingEnabled ? this._availableTools : null)
+        this._providerAdapter.makeRequest(fullPrompt, this._toolCallingEnabled)
             .then(response => {
+                log(`Received response from API: text length=${response.text ? response.text.length : 0}, tool calls=${response.toolCalls ? response.toolCalls.length : 0}`);
+                
+                // Check for tool calls
                 if (response.toolCalls && response.toolCalls.length > 0) {
+                    log(`Processing ${response.toolCalls.length} tool calls`);
+                    
+                    // Remove thinking message before showing tool call processing
+                    if (!this._settings.get_boolean('hide-thinking')) {
+                        const children = this._messageContainer.get_children();
+                        const lastChild = children[children.length - 1];
+                        if (lastChild && lastChild._isThinking) {
+                            this._messageContainer.remove_child(lastChild);
+                        }
+                    }
+                    
                     this._handleToolCalls(response.toolCalls, response.text);
                 } else {
+                    // Remove thinking message if it exists
+                    if (!this._settings.get_boolean('hide-thinking')) {
+                        const children = this._messageContainer.get_children();
+                        const lastChild = children[children.length - 1];
+                        if (lastChild && lastChild._isThinking) {
+                            this._messageContainer.remove_child(lastChild);
+                        }
+                    }
+                    
                     this._addMessage(response.text, 'ai');
                 }
             })
             .catch(error => {
+                // Remove thinking message if it exists
+                if (!this._settings.get_boolean('hide-thinking')) {
+                    const children = this._messageContainer.get_children();
+                    const lastChild = children[children.length - 1];
+                    if (lastChild && lastChild._isThinking) {
+                        this._messageContainer.remove_child(lastChild);
+                    }
+                }
+                
                 this._addMessage(`Error: ${error.message}`, 'ai');
             });
     }
 
     _handleToolCalls(toolCalls, originalResponse) {
+        // Log tool calls for debugging
+        log(`Handling tool calls: ${JSON.stringify(toolCalls)}`);
+        
+        // Check for tool call limits and loops
+        this._toolCallCount++;
+        if (this._toolCallCount > this._maxToolCalls) {
+            const errorMsg = `Tool call limit exceeded (${this._maxToolCalls} calls). This might indicate a loop in the AI's reasoning. Stopping further tool calls.`;
+            log(errorMsg);
+            this._addMessage(errorMsg, 'system');
+            this._toolCallCount = 0; // Reset counter
+            this._recentToolCalls = []; // Clear recent calls
+            
+            // Add a final response using the information we have
+            const finalResponse = `Based on the information gathered so far, the current time is ${new Date().toLocaleTimeString()}.`;
+            this._addMessage(finalResponse, 'ai');
+            return;
+        }
+
+        // Store and check for repeated tool calls
+        const currentCall = toolCalls.map(call => ({
+            name: call.function.name,
+            args: call.function.arguments
+        }));
+        
+        // Check for repeated identical calls
+        const isRepeatedCall = this._recentToolCalls.some(prevCall => 
+            JSON.stringify(prevCall) === JSON.stringify(currentCall)
+        );
+
+        if (isRepeatedCall) {
+            const errorMsg = "Detected repeated identical tool calls. Stopping to prevent loops.";
+            log(errorMsg);
+            this._addMessage(errorMsg, 'system');
+            this._toolCallCount = 0; // Reset counter
+            this._recentToolCalls = []; // Clear recent calls
+            
+            // Add a final response that uses the information we have
+            const finalResponse = `I've already executed this tool call. Based on the previous results, the current time is ${new Date().toLocaleTimeString()}.`;
+            this._addMessage(finalResponse, 'ai');
+            return;
+        }
+
+        // Add current call to recent calls
+        this._recentToolCalls.push(currentCall);
+        if (this._recentToolCalls.length > this._maxRecentToolCalls) {
+            this._recentToolCalls.shift(); // Remove oldest call
+        }
+
+        // Remove the "Thinking..." message if it exists
+        const children = this._messageContainer.get_children();
+        const lastChild = children[children.length - 1];
+        if (lastChild && lastChild._isThinking) {
+            this._messageContainer.remove_child(lastChild);
+        }
+        
         // Create an array of promises for all tool calls
         const toolPromises = toolCalls.map(toolCall => {
             return new Promise((resolve, reject) => {
                 try {
+                    log(`Executing tool call: ${toolCall.function.name} with args: ${toolCall.function.arguments}`);
+                    
+                    // Parse arguments again to be safe
+                    let args;
+                    try {
+                        args = JSON.parse(toolCall.function.arguments);
+                    } catch (e) {
+                        log(`Failed to parse arguments JSON: ${e.message}, using as-is`);
+                        args = toolCall.function.arguments;
+                    }
+                    
                     const result = this._executeToolCall({
                         name: toolCall.function.name,
-                        arguments: JSON.parse(toolCall.function.arguments)
+                        arguments: args
                     });
                     
                     if (result instanceof Promise) {
-                        result.then(resolve).catch(reject);
+                        result.then(r => {
+                            log(`Tool ${toolCall.function.name} returned Promise result: ${JSON.stringify(r)}`);
+                            resolve({
+                                toolName: toolCall.function.name,
+                                args: args,
+                                result: r
+                            });
+                        }).catch(e => {
+                            log(`Tool ${toolCall.function.name} Promise error: ${e.message}`);
+                            reject(e);
+                        });
                     } else {
-                        resolve(result);
+                        log(`Tool ${toolCall.function.name} returned result: ${JSON.stringify(result)}`);
+                        resolve({
+                            toolName: toolCall.function.name,
+                            args: args,
+                            result: result
+                        });
                     }
                 } catch (error) {
+                    log(`Error executing tool call: ${error.message}`);
                     reject(error);
                 }
             });
@@ -2108,29 +1467,178 @@ class LLMChatBox {
         // Wait for all tool calls to complete
         Promise.all(toolPromises)
             .then(results => {
-                const toolResults = results.map((result, index) => ({
-                    name: toolCalls[index].function.name,
-                    result: result
+                log(`All tool calls completed, processing results`);
+                
+                // Create a better format for the results that includes tool name and args
+                const toolResults = results.map(result => ({
+                    name: result.toolName,
+                    arguments: result.args,
+                    result: result.result
                 }));
 
                 // If we have tool results, make a follow-up request
                 if (toolResults.length > 0) {
+                    // Add an intermediate message showing the tool results
+                    let toolResultMessage = "Tool execution results:\n";
+                    toolResults.forEach(result => {
+                        toolResultMessage += `\n• ${result.name}: ${JSON.stringify(result.result, null, 2)}\n`;
+                    });
+                    
+                    // Display tool results as system message
+                    this._addMessage(toolResultMessage, 'system');
+                    
+                    // Build history of all tool calls made in this session
+                    const toolCallHistory = this._recentToolCalls.map(calls => {
+                        return calls.map(call => `${call.name}(${JSON.stringify(call.args)})`).join(", ");
+                    }).join(" → ");
+                    
+                    // Prepare a more structured tool result text for the AI
                     const toolResultsText = toolResults.map(result => 
-                        `Tool '${result.name}' returned:\n${result.result}`
+                        `Tool '${result.name}' with arguments ${JSON.stringify(result.arguments)} returned:\n${JSON.stringify(result.result, null, 2)}`
                     ).join('\n\n');
 
-                    const followUpPrompt = `${originalResponse}\n\nTool results:\n${toolResultsText}\n\nPlease provide a complete response using the tool results above. Include relevant information from the search results and cite sources when available.`;
+                    // Create a more strongly-worded follow-up prompt
+                    const followUpPrompt = `I have executed the tools you requested. Here are the results:\n\n${toolResultsText}\n\n` +
+                        `IMPORTANT INSTRUCTIONS:\n` +
+                        `1. DO NOT request the same tool calls again. You've already called: ${toolCallHistory}\n` +
+                        `2. You already have the information requested above - please use it.\n` +
+                        `3. YOU MUST NOW provide a complete, natural language response using the information gathered.\n` +
+                        `4. DO NOT request additional tools unless absolutely necessary for a completely different purpose.\n\n` +
+                        `Previous context: ${originalResponse}\n\n` +
+                        `Please provide your final answer as a natural language response based on the tool results above.`;
                     
-                    this._providerAdapter.makeRequest(followUpPrompt)
+                    log(`Making follow-up request with tool results and explicit instructions to provide final answer`);
+                    
+                    // Add a temporary message
+                    this._addMessage("Processing tool results...", 'assistant', true);
+                    
+                    // First try without tool calling enabled to encourage a text response
+                    this._providerAdapter.makeRequest(followUpPrompt, false)
                         .then(response => {
-                            this._addMessage(response.text, 'ai');
+                            // Remove the temporary message
+                            const children = this._messageContainer.get_children();
+                            const lastChild = children[children.length - 1];
+                            if (lastChild && lastChild._isThinking) {
+                                this._messageContainer.remove_child(lastChild);
+                            }
+                            
+                            // Use the text response
+                            if (response.text && response.text.trim()) {
+                                this._addMessage(response.text, 'ai');
+                            } else {
+                                // If no text response, generate one based on the tool results
+                                let generatedResponse = "Based on the information I gathered: ";
+                                
+                                // Generate a response based on tool results
+                                toolResults.forEach(result => {
+                                    if (result.name === 'time_date' && result.arguments.action === 'get_current_time') {
+                                        generatedResponse += `The current time is ${result.result.time}.`;
+                                    } else if (result.name === 'time_date' && result.arguments.action === 'get_current_date') {
+                                        generatedResponse += `Today's date is ${result.result.date}.`;
+                                    } else if (result.name === 'web_search') {
+                                        generatedResponse += `I performed a web search for "${result.arguments.query}".`;
+                                    } else {
+                                        generatedResponse += `I used the ${result.name} tool to get information.`;
+                                    }
+                                });
+                                
+                                this._addMessage(generatedResponse, 'ai');
+                            }
+                            
+                            // Reset the loop detection after a successful response
+                            this._toolCallCount = 0;
+                            this._recentToolCalls = [];
                         })
                         .catch(error => {
-                            this._addMessage(`Error in follow-up request: ${error.message}`, 'ai');
+                            // If the initial request without tools fails, try again with tools enabled
+                            log(`First attempt failed: ${error.message}. Retrying with tools enabled for legitimate follow-up needs.`);
+                            
+                            // Modify the prompt to more explicitly explain follow-up tool usage
+                            const retryPrompt = followUpPrompt + `\n\nIf you absolutely need additional different tools to complete the answer, you may request them, but DO NOT repeat previous tool calls.`;
+                            
+                            this._providerAdapter.makeRequest(retryPrompt, this._toolCallingEnabled)
+                                .then(response => {
+                                    // Remove the temporary message if it still exists
+                                    const children = this._messageContainer.get_children();
+                                    const lastChild = children[children.length - 1];
+                                    if (lastChild && lastChild._isThinking) {
+                                        this._messageContainer.remove_child(lastChild);
+                                    }
+                                    
+                                    // Check if the response contains more tool calls
+                                    if (response.toolCalls && response.toolCalls.length > 0) {
+                                        // Check if these are new, different tool calls
+                                        const isNewToolCall = !this._recentToolCalls.some(prevCalls => {
+                                            return response.toolCalls.some(newCall => {
+                                                const newCallData = {
+                                                    name: newCall.function.name,
+                                                    args: JSON.parse(newCall.function.arguments)
+                                                };
+                                                
+                                                return prevCalls.some(prevCall => 
+                                                    prevCall.name === newCallData.name && 
+                                                    JSON.stringify(prevCall.args) === JSON.stringify(newCallData.args)
+                                                );
+                                            });
+                                        });
+                                        
+                                        if (isNewToolCall) {
+                                            // These appear to be legitimately new tool calls
+                                            log('Received new, different tool calls. Processing...');
+                                            this._handleToolCalls(response.toolCalls, response.text || originalResponse);
+                                        } else {
+                                            // These are repeated tool calls - break the loop
+                                            log('Received repeated tool calls despite warnings. Breaking loop.');
+                                            const errorMsg = "The AI attempted to make repeated tool calls. Stopping to prevent loops.";
+                                            this._addMessage(errorMsg, 'system');
+                                            
+                                            // Generate a final response
+                                            let finalResponse = "Based on the information I gathered: ";
+                                            toolResults.forEach(result => {
+                                                if (result.name === 'time_date' && result.arguments.action === 'get_current_time') {
+                                                    finalResponse += `The current time is ${result.result.time}.`;
+                                                } else if (result.name === 'time_date' && result.arguments.action === 'get_current_date') {
+                                                    finalResponse += `Today's date is ${result.result.date}.`;
+                                                } else if (result.name === 'web_search') {
+                                                    finalResponse += `I found information about "${result.arguments.query}".`;
+                                                } else {
+                                                    finalResponse += `I gathered information using the ${result.name} tool.`;
+                                                }
+                                            });
+                                            
+                                            this._addMessage(finalResponse, 'ai');
+                                            
+                                            // Reset counters
+                                            this._toolCallCount = 0;
+                                            this._recentToolCalls = [];
+                                        }
+                                    } else {
+                                        // No tool calls, just show the text response
+                                        this._addMessage(response.text || "I've processed the tool results.", 'ai');
+                                        
+                                        // Reset counters
+                                        this._toolCallCount = 0;
+                                        this._recentToolCalls = [];
+                                    }
+                                })
+                                .catch(retryError => {
+                                    // If both attempts fail, show the error
+                                    const children = this._messageContainer.get_children();
+                                    const lastChild = children[children.length - 1];
+                                    if (lastChild && lastChild._isThinking) {
+                                        this._messageContainer.remove_child(lastChild);
+                                    }
+                                    
+                                    this._addMessage(`Error in follow-up requests: ${retryError.message}`, 'ai');
+                                });
                         });
+                } else {
+                    // If no tool results, just show the original response
+                    this._addMessage(originalResponse, 'ai');
                 }
             })
             .catch(error => {
+                log(`Failed to execute tool calls: ${error.message}`);
                 this._addMessage(`Error executing tool calls: ${error.message}`, 'ai');
             });
     }
@@ -2205,6 +1713,11 @@ class LLMChatBox {
             style_class: `llm-chat-message llm-chat-message-${sender}`,
             vertical: true
         });
+        
+        // Mark thinking messages so they can be identified later
+        if (thinking) {
+            messageBox._isThinking = true;
+        }
 
         const messageText = new St.Label({
             text: text,
@@ -2231,6 +1744,14 @@ class LLMChatBox {
 
         this._messageContainer.add_child(messageBox);
         this._adjustWindowHeight();
+
+        // Store the message in history if it's not a thinking message
+        if (!thinking) {
+            this._messages.push({
+                sender: sender,
+                text: text
+            });
+        }
 
         // Scroll to the bottom - ensure this happens after the UI has updated
         // Use a small delay to ensure the message is fully rendered before scrolling
@@ -2261,116 +1782,6 @@ class LLMChatBox {
         this.actor.height = Math.max(height, this._initialHeight);
     }
 
-    _prepareContext(detailLevel = 'standard') {
-        // Basic system information
-        const systemInfo = getSystemInfo();
-        const kernelAndUptime = getKernelAndUptime();
-        
-        // Build the context string
-        let contextString = "--- System Context ---\n";
-        contextString += `${systemInfo}\n`;
-        contextString += kernelAndUptime + "\n";
-        
-        // Add focused window and workspace info in all detail levels
-        const workspace = getCurrentWorkspaceInfo();
-        const focusedWindowTitle = getFocusedWindowTitle();
-        contextString += `Current Workspace: ${workspace}\n`;
-        contextString += `Focused Window: ${focusedWindowTitle}\n`;
-
-        if (detailLevel === 'basic') {
-            // Basic level just includes the information above
-            contextString += "--- End System Context ---\n\n";
-            return contextString;
-        }
-        
-        // Standard and detailed levels include CPU, GPU, disk usage
-        const cpuUsage = getCpuUsage();
-        const diskUsage = getDiskUsage();
-        const detailedCpuInfo = getDetailedCpuInfo();
-        const gpuInfo = getGpuInfo();
-        
-        contextString += `${cpuUsage}\n`;
-        if (detailedCpuInfo) contextString += detailedCpuInfo;
-        if (gpuInfo) contextString += `${gpuInfo}\n`;
-        contextString += `${diskUsage}\n`;
-
-        // Add network info for standard and detailed levels
-        const networkInfo = getNetworkInfo();
-        contextString += networkInfo + "\n";
-        
-        // Get clipboard and selection data
-        const selectedText = getSelectedText();
-        const clipboardContent = getClipboardContent();
-        
-        // Add clipboard content if available
-        if (clipboardContent) {
-            contextString += "Clipboard Content:\n";
-            contextString += `  ${clipboardContent.replace(/\n/g, '\n  ')}\n`;
-        }
-        
-        // Add selected text if available
-        if (selectedText) {
-            contextString += "Selected Text:\n";
-            contextString += `  ${selectedText.replace(/\n/g, '\n  ')}\n`;
-        }
-
-        // For detailed level, include running apps, processes and windows
-        if (detailLevel === 'detailed') {
-            // Running applications
-            const runningApps = getRunningApps();
-            if (runningApps.length > 0) {
-                contextString += "Running Applications:\n";
-                runningApps.forEach(app => {
-                    contextString += `  - ${app.name} (${app.windows} windows)\n`;
-                });
-            }
-
-            // Top processes
-            const topProcesses = getTopProcesses(10);
-            if (topProcesses && topProcesses.length > 0) {
-                contextString += "Top Processes (CPU/Memory):\n";
-                topProcesses.forEach(proc => {
-                    // Start with basic process info that should always be available
-                    let processInfo = `  - ${proc.command || 'Unknown'} (PID ${proc.pid || 'Unknown'})`;
-                    
-                    // Add CPU info if available
-                    if (proc.cpu && proc.cpu !== 'N/A') {
-                        processInfo += `, CPU: ${proc.cpu}`;
-                    }
-                    
-                    // Add memory info if available
-                    if (proc.memory && proc.memory !== 'N/A') {
-                        processInfo += `, Mem: ${proc.memory}`;
-                    }
-                    
-                    // Add user info if available
-                    if (proc.user) {
-                        processInfo += `, User: ${proc.user}`;
-                    }
-                    
-                    contextString += processInfo + "\n";
-                });
-            }
-            
-            // Open windows with details
-            const openWindows = getOpenWindows();
-            if (openWindows.length > 0) {
-                contextString += "Open Windows:\n";
-                openWindows.forEach(window => {
-                    const workspaceInfo = window.onCurrentWorkspace ? " (current workspace)" : 
-                                         (window.workspace > 0 ? ` (workspace ${window.workspace})` : "");
-                    const minimizedInfo = window.minimized ? " [minimized]" : "";
-                    contextString += `  - ${window.title}${workspaceInfo}${minimizedInfo}, App: ${window.application}\n`;
-                });
-            } else {
-                contextString += "Open Windows: None\n";
-            }
-        }
-        
-        contextString += "--- End System Context ---\n\n";
-        return contextString;
-    }
-
     _handleShellCommand(text) {
         const lowerText = text.toLowerCase();
         for (const [command, handler] of Object.entries(this._shellCommands)) {
@@ -2399,6 +1810,57 @@ class LLMChatBox {
         }
         
         log(`New session started with ID: ${this._sessionId}`);
+    }
+
+    _getToolSystemPrompt() {
+        // Get the formatted tool descriptions from all loaded tools
+        const toolsArray = toolLoader.getTools();
+        const toolDescriptions = toolsArray.map(tool => {
+            return `Tool: ${tool.name}
+Description: ${tool.description}
+Category: ${tool.category}
+Parameters: ${JSON.stringify(tool.parameters, null, 2)}`;
+        }).join('\n\n');
+
+        // Return the formatted prompt with general guidance to prevent loops
+        return `You are a helpful assistant that has access to tools. You must understand when to use these tools to respond to user queries.
+
+Available tools:
+
+${toolDescriptions}
+
+TOOL USAGE INSTRUCTIONS - FOLLOW THESE EXACTLY:
+
+1. When a user asks something that requires a tool, you MUST respond ONLY with a valid JSON object in this format:
+{
+    "tool": "tool_name",
+    "arguments": {
+        "param1": "value1",
+        "param2": "value2"
+    }
+}
+
+2. Do NOT include ANY explanatory text, markdown, or code formatting when using a tool.
+3. Do NOT include backticks (\`\`\`) or any other text before or after the JSON.
+4. ONLY output the raw JSON object - nothing else.
+5. Make sure your JSON is valid and properly formatted.
+
+IMPORTANT LOOP PREVENTION GUIDELINES:
+
+1. DO NOT request the same tool with the same arguments twice in a row.
+2. After receiving tool results, prioritize providing a natural language response over making additional tool calls.
+3. Only request additional tools when you genuinely need more information that wasn't provided in the first result.
+4. You are limited to 10 tool calls per conversation chain.
+
+EXAMPLES:
+
+To get the current time:
+{"tool": "time_date", "arguments": {"action": "get_current_time"}}
+
+To search the web:
+{"tool": "web_search", "arguments": {"query": "latest news about AI", "engine": "google"}}
+
+If not using a tool, respond conversationally as you normally would.`;
     }
 }
 
