@@ -20,490 +20,6 @@ const _httpSession = new Soup.Session();
 const toolLoader = new ToolLoader();
 toolLoader.loadTools();
 
-class ShellController {
-    constructor() {
-        this._workspaceManager = global.workspace_manager;
-        this._windowTracker = Shell.WindowTracker.get_default();
-        this._displayManager = global.display;
-        log('ShellController initialized');
-    }
-
-    // Workspace operations
-    switchWorkspace(index) {
-        try {
-            log(`Attempting to switch to workspace ${index}`);
-            const workspace = this._workspaceManager.get_workspace_by_index(index - 1);
-            if (workspace) {
-                workspace.activate(global.get_current_time());
-                log(`Successfully switched to workspace ${index}`);
-                return true;
-            } else {
-                log(`Failed to find workspace ${index}`);
-            }
-        } catch (error) {
-            log(`Error switching workspace: ${error.message}`);
-            log(`Stack trace: ${error.stack}`);
-        }
-        return false;
-    }
-
-    // Window operations
-    minimizeAllWindows() {
-        try {
-            log('Attempting to minimize all windows');
-            const windows = global.get_window_actors();
-            let minimizedCount = 0;
-            windows.forEach(actor => {
-                const window = actor.get_meta_window();
-                if (window && !window.is_skip_taskbar()) {
-                    window.minimize();
-                    minimizedCount++;
-                }
-            });
-            log(`Successfully minimized ${minimizedCount} windows`);
-            return true;
-        } catch (error) {
-            log(`Error minimizing windows: ${error.message}`);
-            log(`Stack trace: ${error.stack}`);
-        }
-        return false;
-    }
-
-    maximizeCurrentWindow() {
-        try {
-            log('Attempting to maximize current window');
-            const focusWindow = this._displayManager.focus_window;
-            if (focusWindow) {
-                log(`Maximizing window: ${focusWindow.title}`);
-                focusWindow.maximize(Meta.MaximizeFlags.BOTH);
-                log('Window maximized successfully');
-                return true;
-            } else {
-                log('No focused window found');
-            }
-        } catch (error) {
-            log(`Error maximizing window: ${error.message}`);
-            log(`Stack trace: ${error.stack}`);
-        }
-        return false;
-    }
-
-    arrangeWindowsInGrid(rows = 2, cols = 2) {
-        try {
-            log(`Attempting to arrange windows in ${rows}x${cols} grid`);
-            const workspace = this._workspaceManager.get_active_workspace();
-            const windows = global.get_window_actors()
-                .map(actor => actor.get_meta_window())
-                .filter(window => window && !window.is_skip_taskbar() && window.get_workspace() === workspace);
-
-            log(`Found ${windows.length} windows to arrange`);
-
-            const workArea = workspace.get_work_area_for_monitor(this._displayManager.get_primary_monitor());
-            const cellWidth = workArea.width / cols;
-            const cellHeight = workArea.height / rows;
-
-            windows.forEach((window, index) => {
-                const row = Math.floor(index / cols);
-                const col = index % cols;
-                if (row < rows) {
-                    log(`Arranging window ${window.title} at position (${row}, ${col})`);
-                    window.unmaximize(Meta.MaximizeFlags.BOTH);
-                    window.move_resize_frame(
-                        true,
-                        workArea.x + (col * cellWidth),
-                        workArea.y + (row * cellHeight),
-                        cellWidth,
-                        cellHeight
-                    );
-                }
-            });
-            log('Window arrangement completed');
-            return true;
-        } catch (error) {
-            log(`Error arranging windows: ${error.message}`);
-            log(`Stack trace: ${error.stack}`);
-        }
-        return false;
-    }
-
-    // Application operations
-    launchApplication(appId) {
-        try {
-            log(`Attempting to launch application: ${appId}`);
-            
-            // Try to get app info using different methods
-            let app = null;
-            
-            // Method 1: Try direct app ID
-            app = Gio.AppInfo.get_default_for_type(appId, false);
-            if (!app) {
-                log(`Direct app lookup failed for ${appId}, trying alternative methods`);
-                
-                // Method 2: Try with .desktop extension
-                const desktopId = appId.endsWith('.desktop') ? appId : `${appId}.desktop`;
-                app = Gio.AppInfo.get_default_for_type(desktopId, false);
-                
-                if (!app) {
-                    // Method 3: Try to find by executable name
-                    const appSystem = Shell.AppSystem.get_default();
-                    const allApps = appSystem.get_installed();
-                    
-                    for (let installedApp of allApps) {
-                        const exec = installedApp.get_executable();
-                        if (exec && exec.toLowerCase().includes(appId.toLowerCase())) {
-                            app = installedApp;
-                            log(`Found matching app by executable: ${exec}`);
-                            break;
-                        }
-                    }
-                }
-            }
-
-            if (app) {
-                log(`Found application: ${app.get_name()} (${app.get_id()})`);
-                const success = app.launch([], null);
-                if (success) {
-                    log(`Successfully launched ${app.get_name()}`);
-                    return true;
-                } else {
-                    log(`Failed to launch ${app.get_name()}`);
-                }
-            } else {
-                log(`Could not find application matching: ${appId}`);
-                // List available applications for debugging
-                const appSystem = Shell.AppSystem.get_default();
-                const allApps = appSystem.get_installed();
-                log('Available applications:');
-                allApps.forEach(installedApp => {
-                    log(`- ${installedApp.get_name()} (${installedApp.get_id()})`);
-                });
-            }
-        } catch (error) {
-            log(`Error launching application: ${error.message}`);
-            log(`Stack trace: ${error.stack}`);
-        }
-        return false;
-    }
-
-    // System operations
-    toggleNightLight() {
-        try {
-            log('Attempting to toggle night light');
-            const settings = new Gio.Settings({ schema: 'org.gnome.settings-daemon.plugins.color' });
-            const current = settings.get_boolean('night-light-enabled');
-            settings.set_boolean('night-light-enabled', !current);
-            log(`Night light ${!current ? 'enabled' : 'disabled'}`);
-            return true;
-        } catch (error) {
-            log(`Error toggling night light: ${error.message}`);
-            log(`Stack trace: ${error.stack}`);
-        }
-        return false;
-    }
-
-    // New window management methods
-    moveWindow(x, y) {
-        try {
-            const focusWindow = this._displayManager.focus_window;
-            if (focusWindow) {
-                focusWindow.move_frame(true, x, y);
-                return true;
-            }
-        } catch (error) {
-            log(`Error moving window: ${error.message}`);
-        }
-        return false;
-    }
-
-    resizeWindow(width, height) {
-        try {
-            const focusWindow = this._displayManager.focus_window;
-            if (focusWindow) {
-                const [x, y] = focusWindow.get_frame_rect();
-                focusWindow.move_resize_frame(true, x, y, width, height);
-                return true;
-            }
-        } catch (error) {
-            log(`Error resizing window: ${error.message}`);
-        }
-        return false;
-    }
-
-    closeCurrentWindow() {
-        try {
-            const focusWindow = this._displayManager.focus_window;
-            if (focusWindow) {
-                focusWindow.delete(global.get_current_time());
-                return true;
-            }
-        } catch (error) {
-            log(`Error closing window: ${error.message}`);
-        }
-        return false;
-    }
-
-    // New workspace management methods
-    createWorkspace() {
-        try {
-            const newIndex = this._workspaceManager.get_n_workspaces();
-            this._workspaceManager.add_workspace(newIndex, global.get_current_time());
-            return true;
-        } catch (error) {
-            log(`Error creating workspace: ${error.message}`);
-        }
-        return false;
-    }
-
-    removeWorkspace(index) {
-        try {
-            const workspace = this._workspaceManager.get_workspace_by_index(index - 1);
-            if (workspace) {
-                workspace.remove();
-                return true;
-            }
-        } catch (error) {
-            log(`Error removing workspace: ${error.message}`);
-        }
-        return false;
-    }
-
-    // New system information methods
-    getCurrentTime() {
-        try {
-            const now = GLib.DateTime.new_now_local();
-            return now.format('%H:%M:%S');
-        } catch (error) {
-            log(`Error getting current time: ${error.message}`);
-        }
-        return null;
-    }
-
-    getCurrentDate() {
-        try {
-            const now = GLib.DateTime.new_now_local();
-            return now.format('%Y-%m-%d');
-        } catch (error) {
-            log(`Error getting current date: ${error.message}`);
-        }
-        return null;
-    }
-
-    // New application management methods
-    listInstalledApps() {
-        try {
-            const appSystem = Shell.AppSystem.get_default();
-            const apps = appSystem.get_installed();
-            return apps.map(app => ({
-                name: app.get_name(),
-                id: app.get_id(),
-                description: app.get_description()
-            }));
-        } catch (error) {
-            log(`Error listing installed apps: ${error.message}`);
-        }
-        return [];
-    }
-
-    getRunningApps() {
-        try {
-            const appSystem = Shell.AppSystem.get_default();
-            const runningApps = appSystem.get_running();
-            return runningApps.map(app => ({
-                name: app.get_name(),
-                id: app.get_id(),
-                windows: app.get_windows().length
-            }));
-        } catch (error) {
-            log(`Error getting running apps: ${error.message}`);
-        }
-        return [];
-    }
-
-    // New display management methods
-    setBrightness(level) {
-        try {
-            const settings = new Gio.Settings({ schema: 'org.gnome.settings-daemon.plugins.power' });
-            settings.set_int('brightness', Math.max(0, Math.min(100, level)));
-            return true;
-        } catch (error) {
-            log(`Error setting brightness: ${error.message}`);
-        }
-        return false;
-    }
-
-    setVolume(level) {
-        try {
-            const settings = new Gio.Settings({ schema: 'org.gnome.desktop.sound' });
-            settings.set_int('volume', Math.max(0, Math.min(100, level)));
-            return true;
-        } catch (error) {
-            log(`Error setting volume: ${error.message}`);
-        }
-        return false;
-    }
-
-    // Add web search method
-    searchWeb(query) {
-        return new Promise((resolve, reject) => {
-            try {
-                log(`Searching web for: ${query}`);
-                
-                // Create a new Soup.Message for the fetch request
-                const message = Soup.Message.new('GET', `https://ooglester.com/search?q=${encodeURIComponent(query)}`);
-                
-                // Add headers to mimic a browser request
-                message.request_headers.append('Accept', 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.7');
-                message.request_headers.append('Accept-Language', 'en-US,en;q=0.9');
-                message.request_headers.append('Cache-Control', 'max-age=0');
-                message.request_headers.append('Sec-Ch-Ua', '"Chromium";v="136", "Google Chrome";v="136", "Not.A/Brand";v="99"');
-                message.request_headers.append('Sec-Ch-Ua-Mobile', '?0');
-                message.request_headers.append('Sec-Ch-Ua-Platform', '"Linux"');
-                message.request_headers.append('Sec-Fetch-Dest', 'document');
-                message.request_headers.append('Sec-Fetch-Mode', 'navigate');
-                message.request_headers.append('Sec-Fetch-Site', 'none');
-                message.request_headers.append('Sec-Fetch-User', '?1');
-                message.request_headers.append('Upgrade-Insecure-Requests', '1');
-                message.request_headers.append('User-Agent', 'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/136.0.0.0 Safari/537.36');
-
-                log('Sending fetch request...');
-                
-                // Store reference to this for use in callback
-                const self = this;
-                
-                // Send the request using Soup.Session
-                _httpSession.queue_message(message, function(session, msg) {
-                    if (msg.status_code !== 200) {
-                        log(`Fetch request failed with status: ${msg.status_code}`);
-                        reject(`Failed to perform web search. Status: ${msg.status_code}`);
-                        return;
-                    }
-
-                    const html = msg.response_body.data.toString();
-                    log(`Received HTML response of length: ${html.length}`);
-
-                    // Extract results using a more comprehensive approach
-                    const results = [];
-                    
-                    // First, try to find all article elements
-                    const articleRegex = /<article[^>]*class="result[^"]*"[^>]*>([\s\S]*?)<\/article>/g;
-                    let articleMatch;
-                    
-                    while ((articleMatch = articleRegex.exec(html)) !== null) {
-                        try {
-                            const article = articleMatch[1];
-                            
-                            // Extract URL with more robust pattern
-                            const urlMatch = article.match(/<a[^>]*href="([^"]+)"[^>]*class="url_header"/);
-                            const url = urlMatch ? urlMatch[1] : null;
-                            
-                            // Extract title with more robust pattern
-                            const titleMatch = article.match(/<h3[^>]*>[\s\S]*?<a[^>]*>([^<]+)<\/a>/);
-                            const title = titleMatch ? titleMatch[1].trim() : null;
-                            
-                            // Extract content with more robust pattern
-                            const contentMatch = article.match(/<p[^>]*class="content"[^>]*>([\s\S]*?)<\/p>/);
-                            const content = contentMatch ? contentMatch[1].trim() : null;
-                            
-                            // Extract source engine if available
-                            const engineMatch = article.match(/<span>([^<]+)<\/span>/);
-                            const engine = engineMatch ? engineMatch[1].trim() : null;
-
-                            log(`Processing article - URL: ${url}, Title: ${title}`);
-                            
-                            if (url && title) {
-                                results.push({
-                                    title: title,
-                                    content: content || '',
-                                    url: url,
-                                    engine: engine || ''
-                                });
-                            }
-                        } catch (error) {
-                            log(`Error processing article: ${error.message}`);
-                            continue;
-                        }
-                    }
-
-                    log(`Successfully processed ${results.length} results`);
-                    
-                    if (results.length === 0) {
-                        reject("No search results found. Please try a different search query.");
-                        return;
-                    }
-
-                    // Take top 3 results and format them for the AI
-                    const topResults = results.slice(0, 3);
-                    const searchSummary = topResults.map(result => {
-                        return `Title: ${result.title}\nURL: ${result.url}\nSummary: ${result.content || 'No summary available'}\n`;
-                    }).join('\n---\n\n');
-
-                    // Store the results for potential follow-up requests
-                    self._lastSearchResults = results;
-
-                    // Resolve with the search summary
-                    resolve(searchSummary);
-                });
-
-            } catch (error) {
-                log(`Error in searchWeb: ${error.message}`);
-                reject(`An error occurred while performing the web search: ${error.message}`);
-            }
-        });
-    }
-
-    // Add new method to fetch detailed content from a specific URL
-    fetchUrlContent(url) {
-        try {
-            log(`Fetching content from URL: ${url}`);
-            
-            const message = Soup.Message.new('GET', url);
-            message.request_headers.append('User-Agent', 'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/136.0.0.0 Safari/537.36');
-            
-            const self = this;
-            
-            _httpSession.queue_message(message, function(session, msg) {
-                try {
-                    if (msg.status_code === 200) {
-                        const content = msg.response_body.data.toString();
-                        
-                        // Extract main content (this is a simple approach, might need refinement)
-                        const mainContent = content.match(/<main[^>]*>([\s\S]*?)<\/main>/) || 
-                                         content.match(/<article[^>]*>([\s\S]*?)<\/article>/) ||
-                                         content.match(/<div[^>]*class="[^"]*content[^"]*"[^>]*>([\s\S]*?)<\/div>/);
-                        
-                        if (mainContent) {
-                            // Clean up the content
-                            let cleanContent = mainContent[1]
-                                .replace(/<[^>]+>/g, ' ') // Remove HTML tags
-                                .replace(/\s+/g, ' ') // Normalize whitespace
-                                .trim();
-                            
-                            // Truncate if too long
-                            if (cleanContent.length > 1000) {
-                                cleanContent = cleanContent.substring(0, 1000) + '...';
-                            }
-                            
-                            // Send the content back to the AI
-                            const followUpPrompt = `Here's the detailed content from ${url}:\n\n${cleanContent}\n\nPlease provide a summary of this information.`;
-                            self._addMessage(followUpPrompt, 'ai');
-                        } else {
-                            self._addMessage(`Could not extract main content from ${url}`, 'ai');
-                        }
-                    } else {
-                        self._addMessage(`Failed to fetch content from ${url}. Status: ${msg.status_code}`, 'ai');
-                    }
-                } catch (error) {
-                    log(`Error processing URL content: ${error.message}`);
-                    self._addMessage(`Error processing content from ${url}: ${error.message}`, 'ai');
-                }
-            });
-        } catch (error) {
-            log(`Error in fetchUrlContent: ${error.message}`);
-            this._addMessage(`Error fetching content from ${url}: ${error.message}`, 'ai');
-        }
-    }
-}
-
 // Provider Adapter class to handle different AI providers
 class ProviderAdapter {
     constructor(settings) {
@@ -517,25 +33,25 @@ class ProviderAdapter {
         
         try {
             let response;
-            switch (provider) {
-                case 'openai':
+        switch (provider) {
+            case 'openai':
                     response = await this._makeOpenAIRequest(text, toolCalls);
                     break;
-                case 'gemini':
+            case 'gemini':
                     response = await this._makeGeminiRequest(text, toolCalls);
                     break;
-                case 'anthropic':
+            case 'anthropic':
                     response = await this._makeAnthropicRequest(text, toolCalls);
                     break;
-                case 'llama':
+            case 'llama':
                     response = await this._makeLlamaRequest(text, toolCalls);
                     break;
-                case 'ollama':
+            case 'ollama':
                     response = await this._makeOllamaRequest(text, toolCalls);
                     break;
-                default:
-                    throw new Error(`Unknown provider: ${provider}`);
-            }
+            default:
+                throw new Error(`Unknown provider: ${provider}`);
+        }
             
             return response;
         } catch (error) {
@@ -1089,17 +605,12 @@ class LLMChatBox {
 
         inputBox.add_child(this._entryText);
 
-
-
-
         // Container for buttons (horizontal)
         const buttonBox = new St.BoxLayout({
             style_class: 'llm-chat-button-box', // Add a class for potential styling
             vertical: false,
              x_align: Clutter.ActorAlign.END // Align buttons to right
         });
-
-
 
         // Send button
         const sendButton = new St.Button({
@@ -1141,61 +652,18 @@ class LLMChatBox {
         this.actor.add_child(inputBox); // Add the entire input box (entry + buttons) to main actor.
         this._adjustWindowHeight(); // Adjust height on creation.
 
-        this._shellController = new ShellController();
-        
-        // Add shell control commands to the message handling
-        this._shellCommands = {
-            'switch to workspace': (params) => {
-                const index = parseInt(params[0]);
-                if (!isNaN(index)) {
-                    log(`Executing shell command: switch to workspace ${index}`);
-                    return this._shellController.switchWorkspace(index);
-                }
-                log(`Invalid workspace index: ${params[0]}`);
-                return false;
-            },
-            'minimize all windows': () => {
-                log('Executing shell command: minimize all windows');
-                return this._shellController.minimizeAllWindows();
-            },
-            'maximize current window': () => {
-                log('Executing shell command: maximize current window');
-                return this._shellController.maximizeCurrentWindow();
-            },
-            'arrange windows': (params) => {
-                const rows = parseInt(params[0]) || 2;
-                const cols = parseInt(params[1]) || 2;
-                log(`Executing shell command: arrange windows ${rows}x${cols}`);
-                return this._shellController.arrangeWindowsInGrid(rows, cols);
-            },
-            'launch': (params) => {
-                if (!params[0]) {
-                    log('No application specified for launch command');
-                    return false;
-                }
-                log(`Executing shell command: launch ${params[0]}`);
-                return this._shellController.launchApplication(params[0]);
-            },
-            'toggle night light': () => {
-                log('Executing shell command: toggle night light');
-                return this._shellController.toggleNightLight();
-            },
-            'web_search': (params) => {
-                if (!params[0]) {
-                    log('No query specified for web search');
-                    return false;
-                }
-                log(`Executing shell command: web_search ${params[0]}`);
-                return this._shellController.searchWeb(params[0]);
-            }
-        };
-
+        // Initialize the provider adapter
         this._providerAdapter = new ProviderAdapter(settings);
 
-        // Replace old tool system with new one
+        // Initialize tool system
         this.toolLoader = new ToolLoader();
         this.toolLoader.loadTools();
         this.tools = this.toolLoader.getTools();
+        
+        // Always enable tool calling by default, since we're now relying on it for all functionality
+        this._toolCallingEnabled = true;
+        this._toolCallingToggleButton.label = 'Tools: ON';
+        this._toolCallingToggleButton.add_style_class_name('llm-chat-tool-button-selected');
     }
 
     _onEntryActivated() {
@@ -1288,7 +756,7 @@ class LLMChatBox {
         // This allows fresh tool calls for each new user query
         this._toolCallCount = 0;
         this._recentToolCalls = [];
-        
+
         // Add user message
         this._addMessage(message, 'user');
 
@@ -1300,23 +768,14 @@ class LLMChatBox {
         // Get conversation history
         const history = this._getConversationHistory();
 
-        // Check for shell commands first
-        const shellResponse = this._handleShellCommand(message);
-        if (shellResponse) {
-            this._addMessage(shellResponse, 'system');
-            return;
-        }
-
         // Construct the full prompt with conversation history
         const fullPrompt = history + message;
         
         // Log the tool calling state and available tools
-        if (this._toolCallingEnabled) {
-            log(`Tool calling enabled. Available tools: ${this.toolLoader.getTools().length}`);
-        }
+        log(`Tool calling is now always enabled. Available tools: ${this.toolLoader.getTools().length}`);
 
-        // Make the API request using the provider adapter
-        this._providerAdapter.makeRequest(fullPrompt, this._toolCallingEnabled)
+        // Make the API request using the provider adapter - always enable tool calls
+        this._providerAdapter.makeRequest(fullPrompt, true)
             .then(response => {
                 log(`Received response from API: text length=${response.text ? response.text.length : 0}, tool calls=${response.toolCalls ? response.toolCalls.length : 0}`);
                 
@@ -1524,7 +983,7 @@ class LLMChatBox {
                             
                             // Use the text response
                             if (response.text && response.text.trim()) {
-                                this._addMessage(response.text, 'ai');
+                            this._addMessage(response.text, 'ai');
                             } else {
                                 // If no text response, generate one based on the tool results
                                 let generatedResponse = "Based on the information I gathered: ";
@@ -1782,20 +1241,6 @@ class LLMChatBox {
         this.actor.height = Math.max(height, this._initialHeight);
     }
 
-    _handleShellCommand(text) {
-        const lowerText = text.toLowerCase();
-        for (const [command, handler] of Object.entries(this._shellCommands)) {
-            if (lowerText.startsWith(command)) {
-                const params = text.slice(command.length).trim().split(/\s+/);
-                const success = handler(params);
-                return success ? 
-                    `Successfully executed: ${text}` : 
-                    `Failed to execute: ${text}`;
-            }
-        }
-        return null;
-    }
-
     // Add method to clear session
     clearSession() {
         this._messages = [];
@@ -1967,7 +1412,6 @@ class Extension {
 
                 // Clear arrays and objects
                 this._button._chatBox._messages = [];
-                this._button._chatBox._shellCommands = {};
                 this._button._chatBox._availableTools = [];
 
                 // Destroy the chat box actor

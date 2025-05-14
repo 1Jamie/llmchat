@@ -74,11 +74,11 @@ Click the settings icon in the extension menu or use GNOME Extensions app to con
 
 1. Click the LLM Chat icon in the top panel to open the chat interface
 2. Type your message and press Enter or click Send
-3. Toggle Tools to enable AI to interact with the shell and web tools
+3. Tools are automatically enabled to allow the AI to interact with your system
 
 ## Tool System
 
-The extension uses a modular tool system that allows the AI to interact with your system through structured function calls. When the "Tools: ON" toggle is enabled in the chat interface, the AI can automatically choose and call appropriate tools based on your requests.
+The extension uses a modular tool system that allows the AI to interact with your system through structured function calls.
 
 ### How Tools Work
 
@@ -95,6 +95,18 @@ The extension currently includes these tools:
 - **Description:** Get system context information including windows, workspaces, system info, and clipboard content
 - **Functions:** Get active window title, workspace information, system specifications, RAM usage, CPU info, running applications, clipboard content, and selected text
 - **Example Use:** "What applications are running on my system right now?"
+
+#### WindowManagementTool
+- **Name:** `window_management`
+- **Description:** Manage windows including minimizing, maximizing, arranging, moving, resizing and closing
+- **Functions:** Minimize all windows, maximize current window, arrange windows in grid, move/resize windows
+- **Example Use:** "Maximize my current window" or "Arrange my windows in a 2x2 grid"
+
+#### WorkspaceManagementTool
+- **Name:** `workspace_management`
+- **Description:** Manage workspaces including switching, creating, and removing
+- **Functions:** Switch to workspace, create new workspace, remove workspace, list workspaces
+- **Example Use:** "Switch to workspace 2" or "Create a new workspace"
 
 #### TimeDateTool
 - **Name:** `time_date`
@@ -141,17 +153,6 @@ Each tool follows a standard format that includes:
 - Structured return values
 
 See the `tools/README.md` file for detailed information on creating custom tools.
-
-### Shell Commands
-
-You can also directly type shell commands for the AI to execute:
-
-- `switch to workspace 2` - Switch to workspace 2
-- `minimize all windows` - Minimize all windows
-- `maximize current window` - Maximize the active window
-- `arrange windows 2 2` - Arrange windows in a 2x2 grid
-- `launch firefox` - Launch Firefox
-- `toggle night light` - Toggle night light feature
 
 ## Development
 
