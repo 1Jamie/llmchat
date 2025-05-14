@@ -1,6 +1,6 @@
 'use strict';
 
-const { GObject, GLib } = imports.gi;
+const { GObject, GLib, Shell } = imports.gi;
 const ExtensionUtils = imports.misc.extensionUtils;
 const Me = ExtensionUtils.getCurrentExtension();
 const { BaseTool } = Me.imports.tools.BaseTool;
@@ -10,7 +10,7 @@ class WorkspaceManagementTool extends BaseTool {
     _init() {
         super._init({
             name: 'workspace_management',
-            description: 'Manage workspaces including switching, creating, and removing',
+            description: 'Manage workspaces including switching, creating, and removing. Provides detailed application information per workspace.',
             category: 'workspace',
             parameters: {
                 action: {
@@ -26,6 +26,15 @@ class WorkspaceManagementTool extends BaseTool {
         });
         
         this._workspaceManager = global.workspace_manager;
+        this._windowTracker = Shell.WindowTracker.get_default();
+        
+        // Log initialization with capabilities
+        log('WorkspaceManagementTool initialized with the following capabilities:');
+        log('1. Switch between workspaces by index');
+        log('2. Create new workspaces');
+        log('3. Remove existing workspaces');
+        log('4. List all workspaces with detailed application information');
+        log('5. Enhanced detection of applications per workspace');
     }
 
     execute(params = {}) {
@@ -133,20 +142,79 @@ class WorkspaceManagementTool extends BaseTool {
             const workspaces = [];
             for (let i = 0; i < count; i++) {
                 const workspace = this._workspaceManager.get_workspace_by_index(i);
-                const windowCount = workspace.list_windows().length;
+                const windows = workspace.list_windows();
+                const windowCount = windows.length;
+                
+                // Build list of applications in this workspace
+                const apps = [];
+                const appDict = {};
+                
+                windows.forEach(win => {
+                    if (!win || win.is_skip_taskbar()) return;
+                    
+                    const app = this._windowTracker.get_window_app(win);
+                    if (!app) return;
+                    
+                    const appId = app.get_id();
+                    const title = win.get_title();
+                    
+                    if (!appDict[appId]) {
+                        appDict[appId] = {
+                            name: app.get_name(),
+                            id: appId,
+                            windows: []
+                        };
+                    }
+                    
+                    appDict[appId].windows.push({
+                        title: title || 'Untitled Window',
+                        active: win.has_focus()
+                    });
+                });
+                
+                // Convert to array
+                for (const id in appDict) {
+                    apps.push(appDict[id]);
+                }
+                
+                // Create formatted list for display
+                let formattedAppList = '';
+                if (apps.length > 0) {
+                    apps.forEach((app, index) => {
+                        formattedAppList += `${index + 1}. ${app.name} (${app.windows.length} window${app.windows.length > 1 ? 's' : ''})\n`;
+                        app.windows.forEach(win => {
+                            formattedAppList += `   • "${win.title}"${win.active ? ' (Active)' : ''}\n`;
+                        });
+                    });
+                } else {
+                    formattedAppList = 'No applications running in this workspace.';
+                }
                 
                 workspaces.push({
                     index: i + 1, // User-friendly index (1-based)
                     is_active: (i + 1) === activeIndex,
-                    window_count: windowCount
+                    window_count: windowCount,
+                    applications: apps,
+                    app_count: apps.length,
+                    formatted_apps: formattedAppList
                 });
             }
+            
+            // Create a nicely formatted overview of all workspaces
+            let formattedWorkspaceList = 'Workspace Summary:\n\n';
+            workspaces.forEach(ws => {
+                formattedWorkspaceList += `Workspace ${ws.index}${ws.is_active ? ' (Active)' : ''}:\n`;
+                formattedWorkspaceList += `${ws.app_count} applications, ${ws.window_count} windows\n`;
+                formattedWorkspaceList += ws.formatted_apps;
+                formattedWorkspaceList += '\n';
+            });
             
             return {
                 success: true,
                 workspaces,
                 active_workspace: activeIndex,
-                total_workspaces: count
+                total_workspaces: count,
+                formatted_list: formattedWorkspaceList
             };
         } catch (error) {
             log(`Error listing workspaces: ${error.message}`);

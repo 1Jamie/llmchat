@@ -54,7 +54,7 @@ class ProviderAdapter {
         }
             
             return response;
-        } catch (error) {
+    } catch (error) {
             log(`Error in makeRequest: ${error.message}`);
             throw error;
         }
@@ -87,7 +87,7 @@ class ProviderAdapter {
                             });
                             log(`Found valid tool call JSON with specific pattern: ${match}`);
                         }
-                    } catch (e) {
+        } catch (e) {
                         log(`Failed to parse specific pattern JSON: ${e.message}`);
                     }
                 }
@@ -125,7 +125,7 @@ class ProviderAdapter {
                             });
                             log(`Found valid tool call in code block: ${codeBlockMatch[1]}`);
                         }
-                    } catch (e) {
+                } catch (e) {
                         log(`Failed to parse code block JSON: ${e.message}`);
                     }
                 }
@@ -146,8 +146,8 @@ class ProviderAdapter {
                 // Remove the tool call from the text
                 remainingText = text.replace(match, '').trim();
                 log(`Remaining text after removing tool call: ${remainingText.substring(0, 100)}...`);
-            }
-        } catch (error) {
+        }
+    } catch (error) {
             log(`Error in tool call extraction: ${error.message}`);
         }
 
@@ -188,6 +188,11 @@ class ProviderAdapter {
                 const extracted = this._extractToolCalls(text);
                 toolCalls = extracted.toolCalls;
                 text = extracted.remainingText;
+            }
+
+            // Process thinking tags if hide-thinking is enabled
+            if (this._settings.get_boolean('hide-thinking')) {
+                text = text.replace(/<think>[\s\S]*?<\/think>/g, '');
             }
         } catch (error) {
             log(`Error processing tool response: ${error.message}`);
@@ -243,12 +248,12 @@ class ProviderAdapter {
 
         return new Promise((resolve, reject) => {
             _httpSession.queue_message(message, (session, msg) => {
-                if (msg.status_code !== 200) {
+                    if (msg.status_code !== 200) {
                     const errorMsg = `Llama API error: ${msg.status_code} - ${msg.reason_phrase}`;
                     log(errorMsg);
                     reject(errorMsg);
-                    return;
-                }
+                        return;
+                    }
 
                 try {
                     const response = JSON.parse(msg.response_body.data);
@@ -257,7 +262,7 @@ class ProviderAdapter {
                     // Use shared processing method
                     const processed = this._processToolResponse(response);
                     resolve(processed);
-                } catch (error) {
+                        } catch (error) {
                     log(`Error processing Llama response: ${error.message}`);
                     reject(`Error processing Llama response: ${error.message}`);
                 }
@@ -505,16 +510,16 @@ class LLMChatBox {
         this._maxResponseLength = settings.get_int('max-response-length');
         this._maxInitialHeight = 800;
         this._initialHeight = 600;
-        this._sessionId = GLib.uuid_string_random(); // Generate unique session ID
-        this._lastSearchResults = null; // Store last search results for the current session
+        this._sessionId = GLib.uuid_string_random();
+        this._lastSearchResults = null;
         this._lastSearchQuery = null;
-        this._lastSearchUrls = new Map(); // Store URLs with their titles for reference
+        this._lastSearchUrls = new Map();
         
         // Add tool call tracking for loop protection
         this._toolCallCount = 0;
-        this._maxToolCalls = 10; // Maximum number of tool calls in a single conversation chain
-        this._recentToolCalls = []; // Store recent tool calls to detect loops
-        this._maxRecentToolCalls = 5; // Number of recent tool calls to track for loop detection
+        this._maxToolCalls = 10;
+        this._recentToolCalls = [];
+        this._maxRecentToolCalls = 5;
         
         // Create main container
         this.actor = new St.BoxLayout({
@@ -523,7 +528,7 @@ class LLMChatBox {
             y_expand: true
         });
 
-        // Chat history scroll view - set to fill all available space
+        // Chat history scroll view
         this._scrollView = new St.ScrollView({
             style_class: 'llm-chat-scrollview',
             hscrollbar_policy: St.PolicyType.NEVER,
@@ -540,6 +545,12 @@ class LLMChatBox {
         this._scrollView.set_policy(St.PolicyType.NEVER, St.PolicyType.AUTOMATIC);
         this._scrollView.add_actor(this._messageContainer);
         this.actor.add_child(this._scrollView);
+
+        // Connect to settings changes for thinking visibility
+        this._settingsChangedId = this._settings.connect('changed::hide-thinking', () => {
+            log('Thinking visibility setting changed');
+            this._updateThinkingVisibility();
+        });
 
         // --- Input Area Improvements ---
         // Use a vertical layout for input area to accommodate a larger text entry
@@ -940,11 +951,24 @@ class LLMChatBox {
                     // Add an intermediate message showing the tool results
                     let toolResultMessage = "Tool execution results:\n";
                     toolResults.forEach(result => {
-                        toolResultMessage += `\n• ${result.name}: ${JSON.stringify(result.result, null, 2)}\n`;
+                        if (result.result && result.result.formatted_list) {
+                            toolResultMessage += `\n• ${result.name}: ${result.result.formatted_list}\n`;
+                        } else if (result.result && result.result.results) {
+                            // Handle fetch_web_content results
+                            result.result.results.forEach(contentResult => {
+                                if (contentResult.formatted_content) {
+                                    toolResultMessage += `\n• Content from ${contentResult.url}:\n${contentResult.formatted_content}\n`;
+                                } else if (contentResult.content) {
+                                    toolResultMessage += `\n• Content from ${contentResult.url}:\n${contentResult.content}\n`;
+                                }
+                            });
+                        } else {
+                            toolResultMessage += `\n• ${result.name}: ${JSON.stringify(result.result, null, 2)}\n`;
+                        }
                     });
                     
-                    // Display tool results as system message
-                    this._addMessage(toolResultMessage, 'system');
+                    // Display tool results as system message with toolResults property
+                    this._addMessage(toolResultMessage, 'system', false, toolResults);
                     
                     // Build history of all tool calls made in this session
                     const toolCallHistory = this._recentToolCalls.map(calls => {
@@ -952,9 +976,24 @@ class LLMChatBox {
                     }).join(" → ");
                     
                     // Prepare a more structured tool result text for the AI
-                    const toolResultsText = toolResults.map(result => 
-                        `Tool '${result.name}' with arguments ${JSON.stringify(result.arguments)} returned:\n${JSON.stringify(result.result, null, 2)}`
-                    ).join('\n\n');
+                    const toolResultsText = toolResults.map(result => {
+                        if (result.result && result.result.formatted_list) {
+                            return `Tool '${result.name}' with arguments ${JSON.stringify(result.arguments)} returned:\n${JSON.stringify({...result.result, display: result.result.formatted_list}, null, 2)}`;
+                        } else if (result.result && result.result.results) {
+                            // Format fetch_web_content results
+                            const contentResults = result.result.results.map(contentResult => {
+                                if (contentResult.formatted_content) {
+                                    return `Content from ${contentResult.url}:\n${contentResult.formatted_content}`;
+                                } else if (contentResult.content) {
+                                    return `Content from ${contentResult.url}:\n${contentResult.content}`;
+                                }
+                                return `Error from ${contentResult.url}: ${contentResult.error || 'Unknown error'}`;
+                            }).join('\n\n');
+                            return `Tool '${result.name}' with arguments ${JSON.stringify(result.arguments)} returned:\n${contentResults}`;
+                        } else {
+                            return `Tool '${result.name}' with arguments ${JSON.stringify(result.arguments)} returned:\n${JSON.stringify(result.result, null, 2)}`;
+                        }
+                    }).join('\n\n');
 
                     // Create a more strongly-worded follow-up prompt
                     const followUpPrompt = `I have executed the tools you requested. Here are the results:\n\n${toolResultsText}\n\n` +
@@ -1106,120 +1145,233 @@ class LLMChatBox {
         // Get the last 10 messages for context
         const recentMessages = this._messages.slice(-10);
         let history = '';
+        let tokenCount = 0;
+        const MAX_TOKENS = 2000; // Approximate token limit for context
         
-        // Add last search query and results if available
-        if (this._lastSearchQuery) {
-            history += `Last search query: ${this._lastSearchQuery}\n`;
-            if (this._lastSearchResults) {
-                history += 'Last search results:\n';
-                this._lastSearchResults.slice(0, 3).forEach(result => {
-                    history += `- ${result.title} (${result.url})\n`;
+        // Helper function to estimate tokens (rough approximation)
+        const estimateTokens = (text) => {
+            // Rough estimate: 1 token ≈ 4 characters for English text
+            return Math.ceil(text.length / 4);
+        };
+
+        // Helper function to truncate text to fit within token limit
+        const truncateToTokens = (text, maxTokens) => {
+            const estimatedTokens = estimateTokens(text);
+            if (estimatedTokens <= maxTokens) return text;
+            
+            // Truncate to approximately the right number of characters
+            const maxChars = maxTokens * 4;
+            return text.substring(0, maxChars) + '...';
+        };
+
+        // Process messages in reverse to prioritize recent context
+        for (let i = recentMessages.length - 1; i >= 0; i--) {
+            const msg = recentMessages[i];
+            let messageText = '';
+            
+            if (msg.sender === 'user') {
+                messageText = `User: ${msg.text}\n`;
+            } else if (msg.sender === 'ai') {
+                // For AI messages, only include non-thinking content if thinking is hidden
+                let aiText = msg.text;
+                if (this._settings.get_boolean('hide-thinking')) {
+                    aiText = aiText.replace(/<think>[\s\S]*?<\/think>/g, '');
+                }
+                messageText = `Assistant: ${aiText}\n`;
+            } else if (msg.sender === 'system' && msg.toolResults) {
+                // For tool results, only include essential information
+                const essentialResults = msg.toolResults.map(result => {
+                    // Only include key information from tool results
+                    const essentialInfo = {
+                        name: result.name,
+                        status: result.result?.status || 'unknown',
+                        summary: result.result?.summary || result.result?.formatted_list || ''
+                    };
+                    return essentialInfo;
                 });
-                history += '\n';
+                messageText = `Tool Results:\n${JSON.stringify(essentialResults, null, 2)}\n`;
+            }
+
+            // Check if adding this message would exceed token limit
+            const messageTokens = estimateTokens(messageText);
+            if (tokenCount + messageTokens > MAX_TOKENS) {
+                // If we're about to exceed the limit, truncate the message
+                const remainingTokens = MAX_TOKENS - tokenCount;
+                if (remainingTokens > 100) { // Only add if we have enough tokens left for meaningful content
+                    messageText = truncateToTokens(messageText, remainingTokens);
+                    history = messageText + history;
+                }
+                break;
+            }
+
+            history = messageText + history;
+            tokenCount += messageTokens;
+        }
+
+        // Add a summary of older context if we have room
+        if (this._messages.length > 10 && tokenCount < MAX_TOKENS * 0.8) {
+            const olderMessages = this._messages.slice(0, -10);
+            const summary = `[Previous ${olderMessages.length} messages omitted for brevity]\n`;
+            if (tokenCount + estimateTokens(summary) <= MAX_TOKENS) {
+                history = summary + history;
             }
         }
-        
-        recentMessages.forEach(msg => {
-            if (msg.sender === 'user') {
-                history += `User: ${msg.text}\n`;
-            } else if (msg.sender === 'ai') {
-                history += `Assistant: ${msg.text}\n`;
-            }
-        });
-        
+
         return history;
     }
 
-    _addMessage(text, sender, thinking = false) {
-        // Ensure text is a string and not null or undefined
-        if (text === null || text === undefined) {
-            text = '';
-        }
-        
-        // Log the original message for debugging
-        log(`Adding message from ${sender}, thinking=${thinking}, text length=${text.length}`);
-        if (text.length > 0 && text.length < 100) {
-            log(`Message content: ${text}`);
+    _addMessage(text, sender, isThinking = false, toolResults = null) {
+        // Check for thinking content
+        const thinkingMatch = text.match(/<think>([\s\S]*?)<\/think>/);
+        let mainText = text;
+        let thinkingText = '';
+        if (thinkingMatch) {
+            thinkingText = thinkingMatch[1].trim();
+            mainText = text.replace(/<think>[\s\S]*?<\/think>/g, '').trim();
         }
 
-        // Check if this is a thinking message (explicit thinking flag)
-        if (this._settings.get_boolean('hide-thinking') && thinking) {
-            log('Skipping explicit thinking message');
-            return;
-        }
-        
-        // Handle <think> tags if present
-        const thinkTagPattern = /<think>([\s\S]*?)<\/think>/;
-        const hasThinkTags = thinkTagPattern.test(text);
-        
-        if (hasThinkTags) {
-            log('Message contains thinking tags');
-            // Remove the thinking part but keep the rest of the message
-            text = text.replace(thinkTagPattern, '');
-            
-            // Trim any resulting whitespace and check if there's anything left
-            text = text.trim();
-            
-            if (text.length === 0) {
-                log('Message was only thinking content, skipping');
-                return;
-            }
-            
-            log(`After removing thinking tags, message length: ${text.length}`);
-        }
-
-        const messageBox = new St.BoxLayout({
-            style_class: `llm-chat-message llm-chat-message-${sender}`,
-            vertical: true
-        });
-        
-        // Mark thinking messages so they can be identified later
-        if (thinking) {
-            messageBox._isThinking = true;
-        }
-
-        const messageText = new St.Label({
-            text: text,
-            style_class: 'llm-chat-message-text',
-            y_expand: true
-        });
-
-        // Set line wrap properties on the Clutter.Text inside the St.Label
-        messageText.clutter_text.line_wrap = true;
-        messageText.clutter_text.line_wrap_mode = Pango.WrapMode.WORD_CHAR;
-        messageText.clutter_text.ellipsize = Pango.EllipsizeMode.NONE;
-        messageText.clutter_text.single_line_mode = false;
-
-        // Create a container to ensure proper spacing
-        const textContainer = new St.BoxLayout({
-            vertical: true,
-            style_class: 'llm-chat-text-container',
-            x_expand: true
-        });
-
-        // Add text to container, then container to message box
-        textContainer.add_child(messageText);
-        messageBox.add_child(textContainer);
-
-        this._messageContainer.add_child(messageBox);
-        this._adjustWindowHeight();
-
-        // Store the message in history if it's not a thinking message
-        if (!thinking) {
-            this._messages.push({
+        // If thinking content exists, add it as its own message entry
+        if (thinkingText) {
+            const thinkingMessage = {
+                text: thinkingText,
                 sender: sender,
-                text: text
+                timestamp: new Date().toISOString(),
+                isThinking: true,
+                toolResults: null
+            };
+            this._messages.push(thinkingMessage);
+
+            // Create a dedicated message actor for thinking
+            const thinkingActor = new St.BoxLayout({
+                vertical: true,
+                style_class: 'llm-chat-message llm-chat-thinking-message'
             });
+            const thinkingContent = new St.Label({
+                text: thinkingText,
+                style_class: 'llm-chat-thinking-content',
+                x_expand: true
+            });
+            thinkingContent.clutter_text.line_wrap = true;
+            thinkingContent.clutter_text.line_wrap_mode = Pango.WrapMode.WORD_CHAR;
+            thinkingContent.clutter_text.ellipsize = Pango.EllipsizeMode.NONE;
+            thinkingContent.clutter_text.single_line_mode = false;
+            thinkingActor.add_child(thinkingContent);
+            // Toggle class for visibility
+            if (this._settings.get_boolean('hide-thinking')) {
+                thinkingActor.add_style_class_name('llm-chat-thinking-hidden');
+            }
+            this._messageContainer.add_child(thinkingActor);
         }
 
-        // Scroll to the bottom - ensure this happens after the UI has updated
-        // Use a small delay to ensure the message is fully rendered before scrolling
-        GLib.timeout_add(GLib.PRIORITY_DEFAULT, 100, () => {
-            if (this._scrollView && this._scrollView.vscroll && this._scrollView.vscroll.adjustment) {
-                // Ensure we scroll to the very bottom
-                this._scrollView.vscroll.adjustment.value = this._scrollView.vscroll.adjustment.upper - this._scrollView.vscroll.adjustment.page_size;
+        // Add the main message (if any)
+        if (mainText) {
+            const message = {
+                text: mainText,
+                sender,
+                timestamp: new Date().toISOString(),
+                isThinking,
+                toolResults: toolResults ? this._optimizeToolResults(toolResults) : null
+            };
+            this._messages.push(message);
+
+            const messageActor = new St.BoxLayout({
+                vertical: true,
+                style_class: `llm-chat-message llm-chat-message-${sender}`
+            });
+            const mainContent = new St.Label({
+                text: mainText,
+                style_class: 'llm-chat-message-content',
+                x_expand: true
+            });
+            mainContent.clutter_text.line_wrap = true;
+            mainContent.clutter_text.line_wrap_mode = Pango.WrapMode.WORD_CHAR;
+            mainContent.clutter_text.ellipsize = Pango.EllipsizeMode.NONE;
+            mainContent.clutter_text.single_line_mode = false;
+            messageActor.add_child(mainContent);
+            this._messageContainer.add_child(messageActor);
+        }
+
+        // Scroll to bottom with animation
+        this._scrollToBottom();
+    }
+
+    _scrollToBottom() {
+        // Get the scroll view's adjustment
+        const adjustment = this._scrollView.vscroll.adjustment;
+        
+        // Calculate the target value (bottom of the content)
+        const targetValue = adjustment.upper - adjustment.page_size;
+        
+        // Animate the scroll
+        if (adjustment.value !== targetValue) {
+            // Use a smooth animation
+            const duration = 200; // milliseconds
+            const startValue = adjustment.value;
+            const startTime = Date.now();
+            
+            const animate = () => {
+                const currentTime = Date.now();
+                const elapsed = currentTime - startTime;
+                
+                if (elapsed < duration) {
+                    // Ease out cubic function for smooth deceleration
+                    const progress = 1 - Math.pow(1 - elapsed / duration, 3);
+                    adjustment.value = startValue + (targetValue - startValue) * progress;
+                    return true; // Continue animation
+                } else {
+                    // Ensure we end exactly at the target
+                    adjustment.value = targetValue;
+                    return false; // Stop animation
+                }
+            };
+            
+            // Start the animation
+            GLib.timeout_add(GLib.PRIORITY_DEFAULT, 16, animate);
+        }
+    }
+
+    // Update method to handle thinking visibility changes
+    _updateThinkingVisibility() {
+        const hideThinking = this._settings.get_boolean('hide-thinking');
+        log(`Updating thinking visibility. Hide thinking: ${hideThinking}`);
+        // Update all thinking message entries
+        this._messageContainer.get_children().forEach(messageActor => {
+            if (messageActor.has_style_class_name('llm-chat-thinking-message')) {
+                if (hideThinking) {
+                    messageActor.add_style_class_name('llm-chat-thinking-hidden');
+                    messageActor.visible = false;
+                } else {
+                    messageActor.remove_style_class_name('llm-chat-thinking-hidden');
+                    messageActor.visible = true;
+                }
+                // Force UI update
+                if (messageActor.queue_relayout) messageActor.queue_relayout();
+                if (messageActor.queue_redraw) messageActor.queue_redraw();
             }
-            return GLib.SOURCE_REMOVE;
+        });
+    }
+
+    _optimizeToolResults(toolResults) {
+        return toolResults.map(result => {
+            // Create a minimal version of the tool result
+            const optimized = {
+                name: result.name,
+                status: result.result?.status || 'unknown'
+            };
+
+            // Add only essential result data based on tool type
+            if (result.name === 'web_search') {
+                optimized.summary = result.result?.summary || '';
+                optimized.query = result.arguments?.query || '';
+            } else if (result.name === 'fetch_web_content') {
+                optimized.urls = result.arguments?.urls || [];
+                optimized.status = result.result?.status || 'unknown';
+            } else if (result.name === 'system_context') {
+                optimized.type = result.arguments?.type || '';
+                optimized.summary = result.result?.formatted_list || '';
+            }
+
+            return optimized;
         });
     }
 
@@ -1306,6 +1458,14 @@ To search the web:
 {"tool": "web_search", "arguments": {"query": "latest news about AI", "engine": "google"}}
 
 If not using a tool, respond conversationally as you normally would.`;
+    }
+
+    // Clean up settings connection
+    destroy() {
+        if (this._settingsChangedId) {
+            this._settings.disconnect(this._settingsChangedId);
+        }
+        // ... rest of destroy code ...
     }
 }
 
@@ -1506,5 +1666,106 @@ const style = `
 
 .llm-chat-tool-button-selected:hover {
     background-color: #4a8fe4;
+}
+
+/* Styles for clickable URLs */
+.llm-chat-url-button {
+    padding: 2px 4px;
+    border-radius: 3px;
+    background-color: transparent;
+    transition-duration: 200ms;
+}
+
+.llm-chat-url-button:hover {
+    background-color: rgba(53, 132, 228, 0.1);
+}
+
+.llm-chat-url-button:active {
+    background-color: rgba(53, 132, 228, 0.2);
+}
+
+.llm-chat-url-text {
+    color: #3584e4;
+    text-decoration: underline;
+    font-weight: normal;
+}
+
+/* Thinking content styles */
+.llm-chat-thinking-container {
+    margin-top: 8px;
+    margin-left: 16px;
+    padding: 8px 12px;
+    border-radius: 6px;
+    background-color: rgba(53, 132, 228, 0.1);
+    border-left: 3px solid #3584e4;
+    transition: all 0.2s ease-in-out;
+}
+
+.llm-chat-thinking-hidden {
+    display: none !important;
+}
+
+.llm-chat-thinking-content {
+    color: #666666;
+    font-size: 0.9em;
+    font-style: italic;
+    line-height: 1.4;
+    white-space: pre-wrap;
+}
+
+/* Message container styles */
+.llm-chat-message {
+    padding: 8px 12px;
+    margin: 4px 0;
+    border-radius: 6px;
+    transition: margin 0.2s ease-in-out;
+}
+
+.llm-chat-message-user {
+    background-color: rgba(53, 132, 228, 0.1);
+}
+
+.llm-chat-message-ai {
+    background-color: rgba(255, 255, 255, 0.05);
+}
+
+.llm-chat-message-system {
+    background-color: rgba(255, 255, 255, 0.02);
+    border-left: 3px solid #666666;
+}
+
+.llm-chat-message-content {
+    padding: 4px 0;
+    line-height: 1.4;
+    white-space: pre-wrap;
+}
+
+/* Scroll view styles */
+.llm-chat-scrollview {
+    background-color: transparent;
+}
+
+.llm-chat-scrollview StScrollBar {
+    min-width: 8px;
+    min-height: 8px;
+}
+
+.llm-chat-scrollview StScrollBar StBin#trough {
+    background-color: rgba(255, 255, 255, 0.1);
+    border-radius: 4px;
+}
+
+.llm-chat-scrollview StScrollBar StButton#vhandle {
+    background-color: rgba(255, 255, 255, 0.2);
+    border-radius: 4px;
+    margin: 2px;
+}
+
+.llm-chat-scrollview StScrollBar StButton#vhandle:hover {
+    background-color: rgba(255, 255, 255, 0.3);
+}
+
+.llm-chat-scrollview StScrollBar StButton#vhandle:active {
+    background-color: rgba(255, 255, 255, 0.4);
 }
 `;

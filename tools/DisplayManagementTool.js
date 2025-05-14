@@ -1,6 +1,8 @@
 'use strict';
 
 const { GObject } = imports.gi;
+const Meta = imports.gi.Meta;
+const Main = imports.ui.main;
 const ExtensionUtils = imports.misc.extensionUtils;
 const Me = ExtensionUtils.getCurrentExtension();
 const { BaseTool } = Me.imports.tools.BaseTool;
@@ -10,7 +12,7 @@ class DisplayManagementTool extends BaseTool {
     _init() {
         super._init({
             name: 'display_management',
-            description: 'Get display information and manage display settings',
+            description: 'Get display information and manage display settings using modern GNOME Shell APIs',
             category: 'system',
             parameters: {
                 action: {
@@ -20,6 +22,14 @@ class DisplayManagementTool extends BaseTool {
                 }
             }
         });
+        
+        // Initialize with information about capabilities and recent changes
+        log('DisplayManagementTool initialized with the following capabilities:');
+        log('1. Get information about all connected displays/monitors');
+        log('2. Get detailed information about the primary display');
+        log('3. Using modern Main.layoutManager.monitors API instead of deprecated global.screen');
+        log('4. Fixed "screen is undefined" and "monitor_manager.get_n_monitors is not a function" errors');
+        log('5. Properly handles multi-monitor setups with accurate geometry information');
     }
 
     execute(params = {}) {
@@ -37,24 +47,35 @@ class DisplayManagementTool extends BaseTool {
 
     _getDisplayInfo() {
         try {
-            const screen = global.screen;
-            const displays = [];
+            if (!global.display) {
+                return { error: 'Display not available' };
+            }
 
-            for (let i = 0; i < screen.get_n_monitors(); i++) {
+            const displays = [];
+            const monitors = Main.layoutManager.monitors;
+            
+            if (!monitors || monitors.length === 0) {
+                return { error: 'No monitors found' };
+            }
+            
+            for (let i = 0; i < monitors.length; i++) {
+                const monitor = monitors[i];
+                const workArea = Main.layoutManager.getWorkAreaForMonitor(i);
+                
                 const display = {
                     index: i,
-                    is_primary: screen.get_primary_monitor() === i,
+                    is_primary: monitor.is_primary,
                     geometry: {
-                        x: screen.get_monitor_geometry(i).x,
-                        y: screen.get_monitor_geometry(i).y,
-                        width: screen.get_monitor_geometry(i).width,
-                        height: screen.get_monitor_geometry(i).height
+                        x: monitor.x,
+                        y: monitor.y,
+                        width: monitor.width,
+                        height: monitor.height
                     },
                     work_area: {
-                        x: screen.get_monitor_work_area(i).x,
-                        y: screen.get_monitor_work_area(i).y,
-                        width: screen.get_monitor_work_area(i).width,
-                        height: screen.get_monitor_work_area(i).height
+                        x: workArea.x,
+                        y: workArea.y,
+                        width: workArea.width,
+                        height: workArea.height
                     }
                 };
                 displays.push(display);
@@ -62,6 +83,7 @@ class DisplayManagementTool extends BaseTool {
 
             return {
                 success: true,
+                count: displays.length,
                 displays: displays
             };
         } catch (error) {
@@ -71,26 +93,45 @@ class DisplayManagementTool extends BaseTool {
 
     _getPrimaryDisplay() {
         try {
-            const screen = global.screen;
-            const primaryIndex = screen.get_primary_monitor();
-
-            if (primaryIndex === -1) {
+            if (!global.display) {
+                return { error: 'Display not available' };
+            }
+            
+            // Find primary monitor
+            const monitors = Main.layoutManager.monitors;
+            let primaryMonitor = null;
+            
+            if (!monitors || monitors.length === 0) {
+                return { error: 'No monitors found' };
+            }
+            
+            for (let i = 0; i < monitors.length; i++) {
+                if (monitors[i].is_primary) {
+                    primaryMonitor = monitors[i];
+                    break;
+                }
+            }
+            
+            if (!primaryMonitor) {
                 return { error: 'No primary display found' };
             }
+            
+            const primaryIndex = monitors.indexOf(primaryMonitor);
+            const workArea = Main.layoutManager.getWorkAreaForMonitor(primaryIndex);
 
             const display = {
                 index: primaryIndex,
                 geometry: {
-                    x: screen.get_monitor_geometry(primaryIndex).x,
-                    y: screen.get_monitor_geometry(primaryIndex).y,
-                    width: screen.get_monitor_geometry(primaryIndex).width,
-                    height: screen.get_monitor_geometry(primaryIndex).height
+                    x: primaryMonitor.x,
+                    y: primaryMonitor.y,
+                    width: primaryMonitor.width,
+                    height: primaryMonitor.height
                 },
                 work_area: {
-                    x: screen.get_monitor_work_area(primaryIndex).x,
-                    y: screen.get_monitor_work_area(primaryIndex).y,
-                    width: screen.get_monitor_work_area(primaryIndex).width,
-                    height: screen.get_monitor_work_area(primaryIndex).height
+                    x: workArea.x,
+                    y: workArea.y,
+                    width: workArea.width,
+                    height: workArea.height
                 }
             };
 

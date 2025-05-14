@@ -186,3 +186,62 @@ glib-compile-schemas .
 ## Credits
 
 Developed by 1jamie
+
+## Testing the Extension
+
+Here's a comprehensive list of commands to test the functionality of the extension:
+
+### Display Management
+```
+get display information
+get primary display
+```
+
+### Window Management
+```
+minimize all windows
+maximize all windows
+maximize current window
+arrange windows in grid
+move window to x=100 y=100
+resize window to width=800 height=600
+close current window
+```
+
+### System Settings
+```
+get brightness
+set brightness to 50
+get volume
+set volume to 75
+toggle night light
+```
+
+### Workspace Management
+```
+list workspaces
+switch to workspace 1
+create new workspace
+remove last workspace
+```
+
+### Application Management
+```
+list installed applications
+list running applications
+launch firefox
+```
+
+### Time and Date
+```
+get current time
+get current date
+get timezone
+```
+
+### System Context
+```
+show system info
+show window information
+show detailed system information
+```

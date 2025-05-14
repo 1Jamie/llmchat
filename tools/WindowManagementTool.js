@@ -10,12 +10,12 @@ class WindowManagementTool extends BaseTool {
     _init() {
         super._init({
             name: 'window_management',
-            description: 'Manage windows including minimizing, maximizing, moving, resizing, arranging, and closing',
+            description: 'Manage windows including minimizing, maximizing (single or all), moving, resizing, arranging in grid layouts, and closing',
             category: 'window',
             parameters: {
                 action: {
                     type: 'string',
-                    enum: ['minimize_all', 'maximize_current', 'arrange_grid', 'move', 'resize', 'close_current'],
+                    enum: ['minimize_all', 'maximize_current', 'maximize_all', 'arrange_grid', 'move', 'resize', 'close_current'],
                     description: 'Window action to perform'
                 },
                 rows: {
@@ -48,6 +48,17 @@ class WindowManagementTool extends BaseTool {
         this._workspaceManager = global.workspace_manager;
         this._windowTracker = Shell.WindowTracker.get_default();
         this._displayManager = global.display;
+        
+        // Initialize with information about capabilities and recent changes
+        log('WindowManagementTool initialized with the following capabilities:');
+        log('1. Minimize all windows simultaneously');
+        log('2. Maximize current focused window');
+        log('3. NEW: Maximize all windows simultaneously using global.get_window_actors()');
+        log('4. Arrange windows in a customizable grid layout (rows x columns)');
+        log('5. Move focused window to specific coordinates');
+        log('6. Resize focused window to specific dimensions');
+        log('7. Close current focused window');
+        log('8. All operations use the modern GNOME Shell window management APIs');
     }
 
     execute(params = {}) {
@@ -58,6 +69,8 @@ class WindowManagementTool extends BaseTool {
                 return this._minimizeAllWindows();
             case 'maximize_current':
                 return this._maximizeCurrentWindow();
+            case 'maximize_all':
+                return this._maximizeAllWindows();
             case 'arrange_grid':
                 return this._arrangeWindowsInGrid(rows, cols);
             case 'move':
@@ -100,6 +113,32 @@ class WindowManagementTool extends BaseTool {
         } catch (error) {
             log(`Error minimizing windows: ${error.message}`);
             return { error: `Failed to minimize windows: ${error.message}` };
+        }
+    }
+
+    _maximizeAllWindows() {
+        try {
+            log('Attempting to maximize all windows');
+            const windows = global.get_window_actors();
+            let maximizedCount = 0;
+            
+            windows.forEach(actor => {
+                const window = actor.get_meta_window();
+                if (window && !window.is_skip_taskbar()) {
+                    window.maximize(Meta.MaximizeFlags.BOTH);
+                    maximizedCount++;
+                }
+            });
+            
+            log(`Successfully maximized ${maximizedCount} windows`);
+            return {
+                success: true,
+                count: maximizedCount,
+                message: `Maximized ${maximizedCount} windows`
+            };
+        } catch (error) {
+            log(`Error maximizing windows: ${error.message}`);
+            return { error: `Failed to maximize windows: ${error.message}` };
         }
     }
 
