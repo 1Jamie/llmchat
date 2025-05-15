@@ -1,6 +1,6 @@
 'use strict';
 
-const { GObject, Gio, Soup } = imports.gi;
+const { GObject, Gio, Soup, GLib } = imports.gi;
 const ExtensionUtils = imports.misc.extensionUtils;
 const Me = ExtensionUtils.getCurrentExtension();
 const { BaseTool } = Me.imports.tools.BaseTool;
@@ -64,24 +64,47 @@ var Tool = GObject.registerClass(
                 try {
                     log(`Searching web for: ${query}`);
 
-                    // Create a new Soup.Message for the fetch request
-                    const message = Soup.Message.new('GET', `https://ooglester.com/search?q=${encodeURIComponent(query)}`);
+                    // Create a new Soup.Message for the POST request
+                    const message = Soup.Message.new('POST', 'https://ooglester.com/search');
 
-                    // Add headers to mimic a browser request
-                    message.request_headers.append('Accept', 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.7');
-                    message.request_headers.append('Accept-Language', 'en-US,en;q=0.9');
-                    message.request_headers.append('Cache-Control', 'max-age=0');
-                    message.request_headers.append('Sec-Ch-Ua', '"Chromium";v="136", "Google Chrome";v="136", "Not.A/Brand";v="99"');
-                    message.request_headers.append('Sec-Ch-Ua-Mobile', '?0');
-                    message.request_headers.append('Sec-Ch-Ua-Platform', '"Linux"');
+                    // Add headers to mimic a real browser request
+                    message.request_headers.append('Accept', 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8');
+                    message.request_headers.append('Accept-Language', 'en-US,en;q=0.5');
+                    message.request_headers.append('Content-Type', 'application/x-www-form-urlencoded');
+                    message.request_headers.append('Origin', 'https://ooglester.com');
+                    message.request_headers.append('Referer', 'https://ooglester.com/');
+                    message.request_headers.append('User-Agent', 'Mozilla/5.0 (X11; Linux x86_64; rv:109.0) Gecko/20100101 Firefox/115.0');
+                    message.request_headers.append('Connection', 'keep-alive');
+                    message.request_headers.append('Upgrade-Insecure-Requests', '1');
                     message.request_headers.append('Sec-Fetch-Dest', 'document');
                     message.request_headers.append('Sec-Fetch-Mode', 'navigate');
-                    message.request_headers.append('Sec-Fetch-Site', 'none');
+                    message.request_headers.append('Sec-Fetch-Site', 'same-origin');
                     message.request_headers.append('Sec-Fetch-User', '?1');
-                    message.request_headers.append('Upgrade-Insecure-Requests', '1');
-                    message.request_headers.append('User-Agent', 'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/136.0.0.0 Safari/537.36');
+                    message.request_headers.append('Pragma', 'no-cache');
+                    message.request_headers.append('Cache-Control', 'no-cache');
 
-                    log('Sending fetch request...');
+                    // Build form data to match exactly what the browser sends
+                    const formData = [
+                        `q=${encodeURIComponent(query)}`,
+                        'engines=google',
+                        'engines=bing',
+                        'engines=duckduckgo',
+                        'category_general=1',
+                        'language=auto',
+                        'time_range=',
+                        'safesearch=2',
+                        'theme=simple',
+                        'format=html',
+                        'results_on_page=10'
+                    ].join('&');
+
+                    log(`Sending form data: ${formData}`);
+
+                    // Set the request body
+                    message.set_request_body_from_bytes('application/x-www-form-urlencoded', 
+                        new GLib.Bytes(formData));
+
+                    log('Sending POST request with form data...');
 
                     // Store reference to this for use in callback
                     const self = this;
@@ -96,57 +119,109 @@ var Tool = GObject.registerClass(
 
                         const html = msg.response_body.data.toString();
                         log(`Received HTML response of length: ${html.length}`);
+                        log(`First 500 characters of HTML: ${html.substring(0, 500)}`);
 
                         // Extract results using a more comprehensive approach
                         const results = [];
 
-                        // Find all article elements with the correct class
-                        const articleRegex = /<article[^>]*class="result[^"]*"[^>]*>([\s\S]*?)<\/article>/g;
-                        let articleMatch;
+                        // Try multiple patterns to find search results
+                        const patterns = [
+                            // Pattern 1: Standard SearXNG result format
+                            /<article[^>]*class="result[^"]*"[^>]*>([\s\S]*?)<\/article>/g,
+                            // Pattern 2: Alternative result format
+                            /<div[^>]*class="[^"]*result[^"]*"[^>]*>([\s\S]*?)<\/div>/g,
+                            // Pattern 3: Generic search result format
+                            /<div[^>]*class="[^"]*search-result[^"]*"[^>]*>([\s\S]*?)<\/div>/g,
+                            // Pattern 4: New SearXNG format
+                            /<div[^>]*class="[^"]*result-default[^"]*"[^>]*>([\s\S]*?)<\/div>/g,
+                            // Pattern 5: Latest SearXNG format
+                            /<div[^>]*class="[^"]*result[^"]*"[^>]*>([\s\S]*?)<div class="engines">/g
+                        ];
 
-                        while ((articleMatch = articleRegex.exec(html)) !== null) {
-                            try {
-                                const article = articleMatch[1];
+                        log('Starting search result extraction...');
+                        
+                        for (const pattern of patterns) {
+                            let match;
+                            while ((match = pattern.exec(html)) !== null) {
+                                try {
+                                    const resultHtml = match[1];
+                                    log(`Found potential result with pattern: ${pattern.toString().substring(0, 50)}...`);
+                                    log(`Result HTML: ${resultHtml.substring(0, 200)}...`);
 
-                                // Extract URL with more precise pattern
-                                const urlMatch = article.match(/<a[^>]*href="([^"]+)"[^>]*class="url_header"[^>]*>/);
-                                const url = urlMatch ? urlMatch[1] : null;
+                                    // Try multiple patterns for URL extraction
+                                    const urlPatterns = [
+                                        /<a[^>]*href="([^"]+)"[^>]*class="url_header"[^>]*>/,
+                                        /<a[^>]*href="([^"]+)"[^>]*class="[^"]*result-url[^"]*"[^>]*>/,
+                                        /<a[^>]*href="([^"]+)"[^>]*class="[^"]*title[^"]*"[^>]*>/,
+                                        /<a[^>]*href="([^"]+)"[^>]*class="[^"]*result-title[^"]*"[^>]*>/,
+                                        /<a[^>]*href="([^"]+)"[^>]*class="[^"]*url[^"]*"[^>]*>/
+                                    ];
 
-                                // Extract title with more precise pattern
-                                const titleMatch = article.match(/<h3[^>]*>[\s\S]*?<a[^>]*>([^<]+)<\/a>/);
-                                const title = titleMatch ? titleMatch[1].trim() : null;
+                                    let url = null;
+                                    for (const urlPattern of urlPatterns) {
+                                        const urlMatch = resultHtml.match(urlPattern);
+                                        if (urlMatch) {
+                                            url = urlMatch[1];
+                                            log(`Found URL with pattern: ${urlPattern.toString().substring(0, 50)}...`);
+                                            break;
+                                        }
+                                    }
 
-                                // Extract content with more precise pattern
-                                const contentMatch = article.match(/<p[^>]*class="content"[^>]*>([\s\S]*?)<\/p>/);
-                                const content = contentMatch ? contentMatch[1]
-                                    .replace(/<[^>]+>/g, '') // Remove HTML tags
-                                    .replace(/\s+/g, ' ') // Normalize whitespace
-                                    .trim() : null;
+                                    // Try multiple patterns for title extraction
+                                    const titlePatterns = [
+                                        /<h3[^>]*>[\s\S]*?<a[^>]*>([^<]+)<\/a>/,
+                                        /<div[^>]*class="[^"]*title[^"]*"[^>]*>([^<]+)<\/div>/,
+                                        /<a[^>]*class="[^"]*title[^"]*"[^>]*>([^<]+)<\/a>/,
+                                        /<a[^>]*class="[^"]*result-title[^"]*"[^>]*>([^<]+)<\/a>/,
+                                        /<h3[^>]*>([^<]+)<\/h3>/
+                                    ];
 
-                                // Extract search engines with more precise pattern
-                                const enginesMatch = article.match(/<div class="engines">([\s\S]*?)<\/div>/);
-                                const engines = enginesMatch ? enginesMatch[1]
-                                    .match(/<span>([^<]+)<\/span>/g)
-                                    .map(span => span.replace(/<\/?span>/g, '').trim()) : [];
+                                    let title = null;
+                                    for (const titlePattern of titlePatterns) {
+                                        const titleMatch = resultHtml.match(titlePattern);
+                                        if (titleMatch) {
+                                            title = titleMatch[1].trim();
+                                            log(`Found title with pattern: ${titlePattern.toString().substring(0, 50)}...`);
+                                            break;
+                                        }
+                                    }
 
-                                // Extract cache link if available
-                                const cacheMatch = article.match(/<a[^>]*href="([^"]+)"[^>]*class="cache_link"/);
-                                const cacheUrl = cacheMatch ? cacheMatch[1] : null;
+                                    // Try multiple patterns for content extraction
+                                    const contentPatterns = [
+                                        /<p[^>]*class="content"[^>]*>([\s\S]*?)<\/p>/,
+                                        /<div[^>]*class="[^"]*content[^"]*"[^>]*>([\s\S]*?)<\/div>/,
+                                        /<div[^>]*class="[^"]*snippet[^"]*"[^>]*>([\s\S]*?)<\/div>/,
+                                        /<div[^>]*class="[^"]*result-content[^"]*"[^>]*>([\s\S]*?)<\/div>/,
+                                        /<p[^>]*>([\s\S]*?)<\/p>/
+                                    ];
 
-                                log(`Processing article - URL: ${url}, Title: ${title}`);
+                                    let content = null;
+                                    for (const contentPattern of contentPatterns) {
+                                        const contentMatch = resultHtml.match(contentPattern);
+                                        if (contentMatch) {
+                                            content = contentMatch[1]
+                                                .replace(/<[^>]+>/g, '')
+                                                .replace(/\s+/g, ' ')
+                                                .trim();
+                                            log(`Found content with pattern: ${contentPattern.toString().substring(0, 50)}...`);
+                                            break;
+                                        }
+                                    }
 
-                                if (url && title) {
-                                    results.push({
-                                        title: title,
-                                        content: content || '',
-                                        url: url,
-                                        engines: engines,
-                                        cacheUrl: cacheUrl
-                                    });
+                                    if (url && title) {
+                                        results.push({
+                                            title: title,
+                                            content: content || '',
+                                            url: url
+                                        });
+                                        log(`Added result: ${title}`);
+                                    } else {
+                                        log(`Skipped result - missing URL or title`);
+                                    }
+                                } catch (error) {
+                                    log(`Error processing result: ${error.message}`);
+                                    continue;
                                 }
-                            } catch (error) {
-                                log(`Error processing article: ${error.message}`);
-                                continue;
                             }
                         }
 
@@ -160,12 +235,8 @@ var Tool = GObject.registerClass(
                         // Take top 3 results and format them for the AI
                         const topResults = results.slice(0, 3);
                         const searchSummary = topResults.map((result, index) => {
-                            const source = result.engines.length > 0 ? `Source: ${result.engines.join(', ')}` : '';
-                            return `[${index + 1}] ${result.title}\nURL: ${result.url}\nSummary: ${result.content || 'No summary available'}\n${source}\nCache: ${result.cacheUrl || 'Not available'}\n`;
+                            return `[${index + 1}] ${result.title}\nURL: ${result.url}\nSummary: ${result.content || 'No summary available'}\n`;
                         }).join('\n---\n\n');
-
-                        // Add a note about follow-up capability
-                        const followUpNote = "\nTo get detailed recipe instructions, you can ask me to fetch the content from any of these URLs using the fetch_web_content tool.";
 
                         // Store the results and conversation context
                         const searchResult = {
@@ -181,15 +252,15 @@ var Tool = GObject.registerClass(
                             searchResult
                         ];
 
-                        // Resolve with the search summary and follow-up note
+                        // Resolve with the search summary
                         resolve({
-                            summary: searchSummary + followUpNote,
+                            summary: searchSummary,
                             results: topResults,
                             context: {
                                 query,
                                 timestamp: new Date().toISOString(),
                                 conversation_history: self._conversationHistory,
-                                tool_results: searchResult // Include tool results in context
+                                tool_results: searchResult
                             }
                         });
                     });
@@ -273,4 +344,4 @@ var SystemContextTool = GObject.registerClass(
                 }
             });
         }
-    }); 
+    });

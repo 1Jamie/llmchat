@@ -948,27 +948,15 @@ class LLMChatBox {
 
                 // If we have tool results, make a follow-up request
                 if (toolResults.length > 0) {
-                    // Add an intermediate message showing the tool results
-                    let toolResultMessage = "Tool execution results:\n";
+                    // Create a simplified status message for the UI
+                    let toolStatusMessage = "Tool execution status:\n";
                     toolResults.forEach(result => {
-                        if (result.result && result.result.formatted_list) {
-                            toolResultMessage += `\n• ${result.name}: ${result.result.formatted_list}\n`;
-                        } else if (result.result && result.result.results) {
-                            // Handle fetch_web_content results
-                            result.result.results.forEach(contentResult => {
-                                if (contentResult.formatted_content) {
-                                    toolResultMessage += `\n• Content from ${contentResult.url}:\n${contentResult.formatted_content}\n`;
-                                } else if (contentResult.content) {
-                                    toolResultMessage += `\n• Content from ${contentResult.url}:\n${contentResult.content}\n`;
-                                }
-                            });
-                        } else {
-                            toolResultMessage += `\n• ${result.name}: ${JSON.stringify(result.result, null, 2)}\n`;
-                        }
+                        const status = result.result?.error ? "Failed" : "Success";
+                        toolStatusMessage += `• ${result.name}: ${status}\n`;
                     });
                     
-                    // Display tool results as system message with toolResults property
-                    this._addMessage(toolResultMessage, 'system', false, toolResults);
+                    // Display simplified tool status as system message
+                    this._addMessage(toolStatusMessage, 'system', false, toolResults);
                     
                     // Build history of all tool calls made in this session
                     const toolCallHistory = this._recentToolCalls.map(calls => {
@@ -1022,7 +1010,7 @@ class LLMChatBox {
                             
                             // Use the text response
                             if (response.text && response.text.trim()) {
-                            this._addMessage(response.text, 'ai');
+                                this._addMessage(response.text, 'ai');
                             } else {
                                 // If no text response, generate one based on the tool results
                                 let generatedResponse = "Based on the information I gathered: ";
@@ -1261,6 +1249,7 @@ class LLMChatBox {
                 thinkingActor.add_style_class_name('llm-chat-thinking-hidden');
             }
             this._messageContainer.add_child(thinkingActor);
+            this._scrollToBottom();
         }
 
         // Add the main message (if any)
@@ -1289,45 +1278,44 @@ class LLMChatBox {
             mainContent.clutter_text.single_line_mode = false;
             messageActor.add_child(mainContent);
             this._messageContainer.add_child(messageActor);
+            this._scrollToBottom();
         }
-
-        // Scroll to bottom with animation
-        this._scrollToBottom();
     }
 
     _scrollToBottom() {
-        // Get the scroll view's adjustment
-        const adjustment = this._scrollView.vscroll.adjustment;
-        
-        // Calculate the target value (bottom of the content)
-        const targetValue = adjustment.upper - adjustment.page_size;
-        
-        // Animate the scroll
-        if (adjustment.value !== targetValue) {
-            // Use a smooth animation
-            const duration = 200; // milliseconds
-            const startValue = adjustment.value;
-            const startTime = Date.now();
-            
-            const animate = () => {
-                const currentTime = Date.now();
-                const elapsed = currentTime - startTime;
-                
-                if (elapsed < duration) {
-                    // Ease out cubic function for smooth deceleration
-                    const progress = 1 - Math.pow(1 - elapsed / duration, 3);
-                    adjustment.value = startValue + (targetValue - startValue) * progress;
-                    return true; // Continue animation
-                } else {
-                    // Ensure we end exactly at the target
-                    adjustment.value = targetValue;
-                    return false; // Stop animation
+        // Add a small delay to ensure content is rendered
+        GLib.timeout_add(GLib.PRIORITY_DEFAULT, 100, () => {
+            if (this._scrollView) {
+                const adjustment = this._scrollView.vscroll.adjustment;
+                if (adjustment) {
+                    // Animate to bottom with easing
+                    const target = adjustment.upper - adjustment.page_size;
+                    const start = adjustment.value;
+                    const duration = 300; // ms
+                    const startTime = Date.now();
+                    
+                    const animate = () => {
+                        const now = Date.now();
+                        const elapsed = now - startTime;
+                        const progress = Math.min(elapsed / duration, 1);
+                        
+                        // Easing function for smooth animation
+                        const easeProgress = 1 - Math.pow(1 - progress, 3);
+                        const current = start + (target - start) * easeProgress;
+                        
+                        adjustment.value = current;
+                        
+                        if (progress < 1) {
+                            GLib.timeout_add(GLib.PRIORITY_DEFAULT, 16, animate);
+                        }
+                    };
+                    
+                    animate();
                 }
-            };
-            
-            // Start the animation
-            GLib.timeout_add(GLib.PRIORITY_DEFAULT, 16, animate);
-        }
+            }
+            return GLib.SOURCE_REMOVE;
+        });
+        return GLib.SOURCE_REMOVE;
     }
 
     // Update method to handle thinking visibility changes
