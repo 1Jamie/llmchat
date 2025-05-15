@@ -1,6 +1,6 @@
 # LLM Chat - GNOME Shell Extension
 
-A powerful GNOME Shell extension that integrates AI capabilities into your desktop experience. Chat with various AI models directly from your GNOME desktop.
+A seamless integration of AI into your GNOME desktop environment. Chat naturally with AI assistants that understand your system, can help manage windows and workspaces, and execute desktop tasks - all through a native interface. Making your desktop experience smarter and more efficient.
 
 The only ones verifiable working ~well ish is the ollama provider and llamacpp. Both verified working with tool calls. others were half crap built based on the docs and has never been tested... dont expect them to work without a fight.
 
@@ -43,12 +43,12 @@ The only ones verifiable working ~well ish is the ollama provider and llamacpp. 
 
 1. Clone this repository:
    ```bash
-
+    git clone https://github.com/1Jamie/llmchat.git
    ```
 
 2. Copy or link the extension to your GNOME Shell extensions directory:
    ```bash
-   cp -r gnome-shell-extension-llmchat ~/.local/share/gnome-shell/extensions/llmchat@charja113.gmail.com
+   cp -r llmchat ~/.local/share/gnome-shell/extensions/llmchat@charja113.gmail.com
    ```
 
 3. Restart GNOME Shell:
