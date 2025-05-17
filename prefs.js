@@ -248,6 +248,22 @@ function fillPreferencesWindow(window) {
         subtitle: 'Maximum length of responses in characters'
     });
 
+    // Brave Search API Key entry (common setting)
+    const braveSearchBox = new Adw.ActionRow({
+        title: 'Brave Search API Key',
+        subtitle: 'Required for web search functionality. Get your key from https://brave.com/search/api/'
+    });
+    const braveSearchEntry = new Gtk.Entry({
+        hexpand: true,
+        valign: Gtk.Align.CENTER
+    });
+    braveSearchEntry.set_text(settings.get_string('brave-search-api-key'));
+    braveSearchEntry.connect('changed', widget => {
+        settings.set_string('brave-search-api-key', widget.get_text());
+    });
+    braveSearchBox.add_suffix(braveSearchEntry);
+    commonSettings.add(braveSearchBox);
+
     const maxResponseLengthScale = new Gtk.Scale({
         orientation: Gtk.Orientation.HORIZONTAL,
         adjustment: new Gtk.Adjustment({

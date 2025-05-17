@@ -111,5 +111,10 @@
       <summary>Hide Thinking Messages</summary>
       <description>Hide the "thinking" messages while waiting for responses</description>
     </key>
+    <key name="brave-search-api-key" type="s">
+      <default>''</default>
+      <summary>Brave Search API Key</summary>
+      <description>API key for Brave Search service. Get your key from https://brave.com/search/api/</description>
+    </key>
   </schema>
 </schemalist>

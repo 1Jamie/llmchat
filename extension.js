@@ -65,92 +65,70 @@ class ProviderAdapter {
         log('Attempting to extract tool calls from response...');
         let toolCalls = [];
         let remainingText = text;
-
-        // Try multiple approaches to extract JSON
-        let jsonMatches = [];
-        
-        try {
-            // 1. Try specific pattern for tool call JSON
-            const specificPattern = /\{"tool"\s*:\s*"[^"]+"\s*,\s*"arguments"\s*:\s*\{[^}]*\}\}/g;
-            const specificMatches = text.match(specificPattern) || [];
-            
-            if (specificMatches.length > 0) {
-                log(`Found ${specificMatches.length} potential tool call objects with specific pattern`);
-                
-                for (const match of specificMatches) {
-                    try {
-                        const parsed = JSON.parse(match);
-                        if (parsed.tool && parsed.arguments) {
-                            jsonMatches.push({
-                                parsed,
-                                match
-                            });
-                            log(`Found valid tool call JSON with specific pattern: ${match}`);
+        let matches = [];
+        let i = 0;
+        while (i < text.length) {
+            if (text[i] === '{') {
+                let stack = 1;
+                let j = i + 1;
+                let inString = false;
+                let escape = false;
+                while (j < text.length && stack > 0) {
+                    if (inString) {
+                        if (escape) {
+                            escape = false;
+                        } else if (text[j] === '\\') {
+                            escape = true;
+                        } else if (text[j] === '"') {
+                            inString = false;
                         }
-        } catch (e) {
-                        log(`Failed to parse specific pattern JSON: ${e.message}`);
-                    }
-                }
-            }
-
-            // 2. Try XML-style tool_call tags
-            if (jsonMatches.length === 0) {
-                const toolCallXmlMatch = text.match(/<tool_call>([\s\S]*?)<\/tool_call>/);
-                if (toolCallXmlMatch) {
-                    try {
-                        const parsed = JSON.parse(toolCallXmlMatch[1]);
-                        if (parsed.tool && parsed.arguments) {
-                            jsonMatches.push({
-                                parsed,
-                                match: toolCallXmlMatch[0]
-                            });
-                            log(`Found valid tool call in XML tags: ${toolCallXmlMatch[1]}`);
+                    } else {
+                        if (text[j] === '"') {
+                            inString = true;
+                        } else if (text[j] === '{') {
+                            stack++;
+                        } else if (text[j] === '}') {
+                            stack--;
                         }
-                    } catch (e) {
-                        log(`Failed to parse XML tool call: ${e.message}`);
                     }
+                    j++;
                 }
-            }
-
-            // 3. Try code blocks with JSON
-            if (jsonMatches.length === 0) {
-                const codeBlockMatch = text.match(/```(?:json)?\s*([\s\S]*?)```/);
-                if (codeBlockMatch) {
+                if (stack === 0) {
+                    const candidate = text.slice(i, j);
                     try {
-                        const parsed = JSON.parse(codeBlockMatch[1].trim());
+                        const parsed = JSON.parse(candidate);
                         if (parsed.tool && parsed.arguments) {
-                            jsonMatches.push({
-                                parsed,
-                                match: codeBlockMatch[0]
-                            });
-                            log(`Found valid tool call in code block: ${codeBlockMatch[1]}`);
+                            matches.push({ parsed, match: candidate });
                         }
-                } catch (e) {
-                        log(`Failed to parse code block JSON: ${e.message}`);
-                    }
+                    } catch (e) {}
+                    i = j;
+                } else {
+                    break; // Unmatched brace
                 }
+            } else {
+                i++;
             }
-
-            // Process found matches
-            if (jsonMatches.length > 0) {
-                const { parsed, match } = jsonMatches[0];
-                log(`Processing tool call: ${parsed.tool} with arguments: ${JSON.stringify(parsed.arguments)}`);
-                
-                toolCalls = [{
-                    function: {
-                        name: parsed.tool,
-                        arguments: JSON.stringify(parsed.arguments)
-                    }
-                }];
-                
-                // Remove the tool call from the text
-                remainingText = text.replace(match, '').trim();
-                log(`Remaining text after removing tool call: ${remainingText.substring(0, 100)}...`);
         }
-    } catch (error) {
-            log(`Error in tool call extraction: ${error.message}`);
+        // Remove duplicates
+        const seen = new Set();
+        const uniqueMatches = [];
+        for (const m of matches) {
+            const key = m.parsed.tool + JSON.stringify(m.parsed.arguments);
+            if (!seen.has(key)) {
+                seen.add(key);
+                uniqueMatches.push(m);
+            }
         }
-
+        // Remove each JSON from the text
+        for (const { parsed, match } of uniqueMatches) {
+            toolCalls.push({
+                function: {
+                    name: parsed.tool,
+                    arguments: JSON.stringify(parsed.arguments)
+                }
+            });
+            remainingText = remainingText.replace(match, '').trim();
+        }
         return { toolCalls, remainingText };
     }
 
@@ -188,6 +166,20 @@ class ProviderAdapter {
                 const extracted = this._extractToolCalls(text);
                 toolCalls = extracted.toolCalls;
                 text = extracted.remainingText;
+            } else if (typeof response === 'string') {
+                // Handle direct string response
+                text = response;
+                const extracted = this._extractToolCalls(text);
+                toolCalls = extracted.toolCalls;
+                text = extracted.remainingText;
+            } else if (response.tool && response.arguments) {
+                // Handle direct tool call object
+                toolCalls = [{
+                    function: {
+                        name: response.tool,
+                        arguments: JSON.stringify(response.arguments)
+                    }
+                }];
             }
 
             // Process thinking tags if hide-thinking is enabled
@@ -461,7 +453,7 @@ Category: ${tool.category}
 Parameters: ${JSON.stringify(tool.parameters, null, 2)}`;
         }).join('\n\n');
 
-        // Return the formatted prompt with general guidance to prevent loops
+        // Return the formatted prompt with improved guidance
         return `You are a helpful assistant that has access to tools. You must understand when to use these tools to respond to user queries.
 
 Available tools:
@@ -484,12 +476,45 @@ TOOL USAGE INSTRUCTIONS - FOLLOW THESE EXACTLY:
 4. ONLY output the raw JSON object - nothing else.
 5. Make sure your JSON is valid and properly formatted.
 
-IMPORTANT LOOP PREVENTION GUIDELINES:
+CRITICAL CONTEXT AND TOOL USAGE RULES:
+
+1. USER SELECTIONS AND PREFERENCES:
+   - When a user selects or specifies a particular item, you MUST use that selection
+   - DO NOT make new searches after a user has made a selection
+   - If you have the content for the selected item, use it immediately
+   - Respect user preferences and choices throughout the conversation
+
+2. CONTENT AND INFORMATION HANDLING:
+   - If you have already fetched or obtained specific content, use that content
+   - DO NOT make redundant tool calls for information you already have
+   - Use the most relevant and specific tool for each task
+   - Combine information from multiple tools when necessary
+
+3. MULTI-STEP PROBLEM SOLVING:
+   - Start with the most appropriate tool for the initial query
+   - Use subsequent tools to gather additional information as needed
+   - Build upon previous results to get more specific information
+   - Combine results from different tools to form a complete answer
+
+4. INFORMATION GATHERING WORKFLOW:
+   - Begin with broad searches or queries to find relevant sources
+   - Use more specific tools to get detailed information
+   - Follow up with content fetching when you have specific URLs
+   - Stop when you have sufficient information to answer
+
+5. STOPPING CRITERIA:
+   - Stop when you have the specific information requested
+   - Stop when you have sufficient data to answer the question
+   - Stop when you've found the exact item the user selected
+   - DO NOT continue gathering information after finding what's needed
+
+LOOP PREVENTION AND EFFICIENCY:
 
 1. DO NOT request the same tool with the same arguments twice in a row.
 2. After receiving tool results, prioritize providing a natural language response over making additional tool calls.
 3. Only request additional tools when you genuinely need more information that wasn't provided in the first result.
 4. You are limited to 10 tool calls per conversation chain.
+5. If you have enough information to answer, STOP and provide the answer.
 
 EXAMPLES:
 
@@ -498,6 +523,9 @@ To get the current time:
 
 To search the web:
 {"tool": "web_search", "arguments": {"query": "latest news about AI", "engine": "google"}}
+
+To fetch web content:
+{"tool": "fetch_web_content", "arguments": {"urls": ["https://example.com/page1", "https://example.com/page2"]}}
 
 If not using a tool, respond conversationally as you normally would.`;
     }
@@ -731,6 +759,17 @@ class LLMChatBox {
                     log(`Could not parse arguments string, using as-is: ${e.message}`);
                 }
             }
+
+            // Type correction for fetch_web_content: ensure urls is an array
+            if (toolCall.name === 'fetch_web_content' && args.urls) {
+                if (typeof args.urls === 'string') {
+                    try {
+                        args.urls = JSON.parse(args.urls);
+                    } catch (e) {
+                        args.urls = [args.urls];
+                    }
+                }
+            }
             
             log(`Executing tool with arguments: ${JSON.stringify(args)}`);
             const result = tool.execute(args);
@@ -856,10 +895,15 @@ class LLMChatBox {
             args: call.function.arguments
         }));
         
-        // Check for repeated identical calls
-        const isRepeatedCall = this._recentToolCalls.some(prevCall => 
-            JSON.stringify(prevCall) === JSON.stringify(currentCall)
-        );
+        // Check for repeated identical calls with context awareness
+        const isRepeatedCall = this._recentToolCalls.some(prevCall => {
+            // For web search and content fetching, allow repeated calls with different arguments
+            if (currentCall[0].name === 'web_search' || currentCall[0].name === 'fetch_web_content') {
+                return false; // Allow repeated calls for these tools
+            }
+            // For other tools, check for exact matches
+            return JSON.stringify(prevCall) === JSON.stringify(currentCall);
+        });
 
         if (isRepeatedCall) {
             const errorMsg = "Detected repeated identical tool calls. Stopping to prevent loops.";
@@ -983,23 +1027,16 @@ class LLMChatBox {
                         }
                     }).join('\n\n');
 
-                    // Create a more strongly-worded follow-up prompt
-                    const followUpPrompt = `I have executed the tools you requested. Here are the results:\n\n${toolResultsText}\n\n` +
-                        `IMPORTANT INSTRUCTIONS:\n` +
-                        `1. DO NOT request the same tool calls again. You've already called: ${toolCallHistory}\n` +
-                        `2. You already have the information requested above - please use it.\n` +
-                        `3. YOU MUST NOW provide a complete, natural language response using the information gathered.\n` +
-                        `4. DO NOT request additional tools unless absolutely necessary for a completely different purpose.\n\n` +
-                        `Previous context: ${originalResponse}\n\n` +
-                        `Please provide your final answer as a natural language response based on the tool results above.`;
+                    // Make the follow-up prompt more directive for the LLM
+                    const followUpPrompt = `I have fetched the following web content for your request. Please use this information to answer the user's question.\n\n${toolResultsText}\n\nDo not make another tool call. Use the above content to answer as fully as possible.`;
                     
-                    log(`Making follow-up request with tool results and explicit instructions to provide final answer`);
+                    log(`Making follow-up request with tool results and instructions for next steps`);
                     
                     // Add a temporary message
                     this._addMessage("Processing tool results...", 'assistant', true);
                     
-                    // First try without tool calling enabled to encourage a text response
-                    this._providerAdapter.makeRequest(followUpPrompt, false)
+                    // Always enable tool calling for follow-up requests
+                    this._providerAdapter.makeRequest(followUpPrompt, true)
                         .then(response => {
                             // Remove the temporary message
                             const children = this._messageContainer.get_children();
@@ -1008,115 +1045,69 @@ class LLMChatBox {
                                 this._messageContainer.remove_child(lastChild);
                             }
                             
-                            // Use the text response
-                            if (response.text && response.text.trim()) {
-                                this._addMessage(response.text, 'ai');
-                            } else {
-                                // If no text response, generate one based on the tool results
-                                let generatedResponse = "Based on the information I gathered: ";
-                                
-                                // Generate a response based on tool results
-                                toolResults.forEach(result => {
-                                    if (result.name === 'time_date' && result.arguments.action === 'get_current_time') {
-                                        generatedResponse += `The current time is ${result.result.time}.`;
-                                    } else if (result.name === 'time_date' && result.arguments.action === 'get_current_date') {
-                                        generatedResponse += `Today's date is ${result.result.date}.`;
-                                    } else if (result.name === 'web_search') {
-                                        generatedResponse += `I performed a web search for "${result.arguments.query}".`;
-                                    } else {
-                                        generatedResponse += `I used the ${result.name} tool to get information.`;
-                                    }
+                            // Check if the response contains more tool calls
+                            if (response.toolCalls && response.toolCalls.length > 0) {
+                                // Check if these are new, different tool calls
+                                const isNewToolCall = !this._recentToolCalls.some(prevCalls => {
+                                    return response.toolCalls.some(newCall => {
+                                        const newCallData = {
+                                            name: newCall.function.name,
+                                            args: JSON.parse(newCall.function.arguments)
+                                        };
+                                        
+                                        return prevCalls.some(prevCall => 
+                                            prevCall.name === newCallData.name && 
+                                            JSON.stringify(prevCall.args) === JSON.stringify(newCallData.args)
+                                        );
+                                    });
                                 });
                                 
-                                this._addMessage(generatedResponse, 'ai');
+                                if (isNewToolCall) {
+                                    // These appear to be legitimately new tool calls
+                                    log('Received new, different tool calls. Processing...');
+                                    this._handleToolCalls(response.toolCalls, response.text || originalResponse);
+                                } else {
+                                    // These are repeated tool calls - break the loop
+                                    log('Received repeated tool calls despite warnings. Breaking loop.');
+                                    const errorMsg = "The AI attempted to make repeated tool calls. Stopping to prevent loops.";
+                                    this._addMessage(errorMsg, 'system');
+                                    
+                                    // Generate a final response based on available information
+                                    let finalResponse = "Based on the information I gathered: ";
+                                    toolResults.forEach(result => {
+                                        if (result.name === 'web_search') {
+                                            finalResponse += `I found information about "${result.arguments.query}". `;
+                                        } else if (result.name === 'fetch_web_content') {
+                                            finalResponse += `I retrieved content from ${result.arguments.url}. `;
+                                        } else {
+                                            finalResponse += `I gathered information using the ${result.name} tool. `;
+                                        }
+                                    });
+                                    
+                                    this._addMessage(finalResponse, 'ai');
+                                    
+                                    // Reset counters
+                                    this._toolCallCount = 0;
+                                    this._recentToolCalls = [];
+                                }
+                            } else {
+                                // No tool calls, just show the text response
+                                this._addMessage(response.text || "I've processed the tool results.", 'ai');
+                                
+                                // Reset counters
+                                this._toolCallCount = 0;
+                                this._recentToolCalls = [];
                             }
-                            
-                            // Reset the loop detection after a successful response
-                            this._toolCallCount = 0;
-                            this._recentToolCalls = [];
                         })
                         .catch(error => {
-                            // If the initial request without tools fails, try again with tools enabled
-                            log(`First attempt failed: ${error.message}. Retrying with tools enabled for legitimate follow-up needs.`);
+                            // If the request fails, show the error
+                            const children = this._messageContainer.get_children();
+                            const lastChild = children[children.length - 1];
+                            if (lastChild && lastChild._isThinking) {
+                                this._messageContainer.remove_child(lastChild);
+                            }
                             
-                            // Modify the prompt to more explicitly explain follow-up tool usage
-                            const retryPrompt = followUpPrompt + `\n\nIf you absolutely need additional different tools to complete the answer, you may request them, but DO NOT repeat previous tool calls.`;
-                            
-                            this._providerAdapter.makeRequest(retryPrompt, this._toolCallingEnabled)
-                                .then(response => {
-                                    // Remove the temporary message if it still exists
-                                    const children = this._messageContainer.get_children();
-                                    const lastChild = children[children.length - 1];
-                                    if (lastChild && lastChild._isThinking) {
-                                        this._messageContainer.remove_child(lastChild);
-                                    }
-                                    
-                                    // Check if the response contains more tool calls
-                                    if (response.toolCalls && response.toolCalls.length > 0) {
-                                        // Check if these are new, different tool calls
-                                        const isNewToolCall = !this._recentToolCalls.some(prevCalls => {
-                                            return response.toolCalls.some(newCall => {
-                                                const newCallData = {
-                                                    name: newCall.function.name,
-                                                    args: JSON.parse(newCall.function.arguments)
-                                                };
-                                                
-                                                return prevCalls.some(prevCall => 
-                                                    prevCall.name === newCallData.name && 
-                                                    JSON.stringify(prevCall.args) === JSON.stringify(newCallData.args)
-                                                );
-                                            });
-                                        });
-                                        
-                                        if (isNewToolCall) {
-                                            // These appear to be legitimately new tool calls
-                                            log('Received new, different tool calls. Processing...');
-                                            this._handleToolCalls(response.toolCalls, response.text || originalResponse);
-                                        } else {
-                                            // These are repeated tool calls - break the loop
-                                            log('Received repeated tool calls despite warnings. Breaking loop.');
-                                            const errorMsg = "The AI attempted to make repeated tool calls. Stopping to prevent loops.";
-                                            this._addMessage(errorMsg, 'system');
-                                            
-                                            // Generate a final response
-                                            let finalResponse = "Based on the information I gathered: ";
-                                            toolResults.forEach(result => {
-                                                if (result.name === 'time_date' && result.arguments.action === 'get_current_time') {
-                                                    finalResponse += `The current time is ${result.result.time}.`;
-                                                } else if (result.name === 'time_date' && result.arguments.action === 'get_current_date') {
-                                                    finalResponse += `Today's date is ${result.result.date}.`;
-                                                } else if (result.name === 'web_search') {
-                                                    finalResponse += `I found information about "${result.arguments.query}".`;
-                                                } else {
-                                                    finalResponse += `I gathered information using the ${result.name} tool.`;
-                                                }
-                                            });
-                                            
-                                            this._addMessage(finalResponse, 'ai');
-                                            
-                                            // Reset counters
-                                            this._toolCallCount = 0;
-                                            this._recentToolCalls = [];
-                                        }
-                                    } else {
-                                        // No tool calls, just show the text response
-                                        this._addMessage(response.text || "I've processed the tool results.", 'ai');
-                                        
-                                        // Reset counters
-                                        this._toolCallCount = 0;
-                                        this._recentToolCalls = [];
-                                    }
-                                })
-                                .catch(retryError => {
-                                    // If both attempts fail, show the error
-                                    const children = this._messageContainer.get_children();
-                                    const lastChild = children[children.length - 1];
-                                    if (lastChild && lastChild._isThinking) {
-                                        this._messageContainer.remove_child(lastChild);
-                                    }
-                                    
-                                    this._addMessage(`Error in follow-up requests: ${retryError.message}`, 'ai');
-                                });
+                            this._addMessage(`Error in follow-up request: ${error.message}`, 'ai');
                         });
                 } else {
                     // If no tool results, just show the original response
@@ -1156,8 +1147,11 @@ class LLMChatBox {
         for (let i = recentMessages.length - 1; i >= 0; i--) {
             const msg = recentMessages[i];
             let messageText = '';
-            
-            if (msg.sender === 'user') {
+
+            if (msg.isThinking && msg.text) {
+                // Include <think> content
+                messageText = `<think>${msg.text}</think>\n`;
+            } else if (msg.sender === 'user') {
                 messageText = `User: ${msg.text}\n`;
             } else if (msg.sender === 'ai') {
                 // For AI messages, only include non-thinking content if thinking is hidden
@@ -1167,17 +1161,58 @@ class LLMChatBox {
                 }
                 messageText = `Assistant: ${aiText}\n`;
             } else if (msg.sender === 'system' && msg.toolResults) {
-                // For tool results, only include essential information
-                const essentialResults = msg.toolResults.map(result => {
-                    // Only include key information from tool results
-                    const essentialInfo = {
-                        name: result.name,
-                        status: result.result?.status || 'unknown',
-                        summary: result.result?.summary || result.result?.formatted_list || ''
-                    };
-                    return essentialInfo;
+                // For tool results, include full tool call and response
+                msg.toolResults.forEach(result => {
+                    // Tool call
+                    messageText += `Tool Call: {\"tool\": \"${result.name}\", \"arguments\": ${JSON.stringify(result.arguments)}}\n`;
+                    
+                    // Format tool response based on tool type
+                    if (result.name === 'web_search' && result.result && result.result.results) {
+                        messageText += 'Web Search Results:\n';
+                        if (result.result.structured_results) {
+                            // Use the structured format for better context
+                            const structured = result.result.structured_results;
+                            messageText += `Query: "${structured.query}"\n`;
+                            messageText += `Total Results: ${structured.total_results}\n\n`;
+                            
+                            structured.top_results.forEach(item => {
+                                messageText += `[${item.rank}] ${item.title}\n`;
+                                messageText += `Source: ${item.source}\n`;
+                                messageText += `URL: ${item.url}\n`;
+                                if (item.published_date) {
+                                    messageText += `Published: ${item.published_date}\n`;
+                                }
+                                messageText += `Relevance: ${item.relevance_score || 'N/A'}\n`;
+                                messageText += `Summary: ${item.summary}\n\n`;
+                            });
+                        } else {
+                            // Fallback to the old format if structured results aren't available
+                            result.result.results.forEach((item, idx) => {
+                                messageText += `[${idx+1}] ${item.title}\n`;
+                                messageText += `URL: ${item.url}\n`;
+                                messageText += `Summary: ${item.content || 'No summary available'}\n\n`;
+                            });
+                        }
+                    } else if (result.name === 'fetch_web_content' && result.result && result.result.results) {
+                        messageText += 'Fetched Content:\n';
+                        result.result.results.forEach((item, idx) => {
+                            if (item.formatted_content) {
+                                messageText += `[${idx+1}] ${item.title || 'Untitled'}\n`;
+                                messageText += `URL: ${item.url}\n`;
+                                messageText += `Content: ${item.formatted_content}\n\n`;
+                            } else if (item.content) {
+                                messageText += `[${idx+1}] ${item.title || 'Untitled'}\n`;
+                                messageText += `URL: ${item.url}\n`;
+                                messageText += `Content: ${item.content}\n\n`;
+                            } else {
+                                messageText += `[${idx+1}] Error from ${item.url}: ${item.error || 'Unknown error'}\n\n`;
+                            }
+                        });
+                    } else {
+                        // For other tools, include the full result
+                        messageText += `Tool Response: ${JSON.stringify(result.result, null, 2)}\n`;
+                    }
                 });
-                messageText = `Tool Results:\n${JSON.stringify(essentialResults, null, 2)}\n`;
             }
 
             // Check if adding this message would exceed token limit
@@ -1205,7 +1240,33 @@ class LLMChatBox {
             }
         }
 
+        // Add a context summary at the beginning
+        const contextSummary = this._generateContextSummary();
+        if (contextSummary && tokenCount + estimateTokens(contextSummary) <= MAX_TOKENS) {
+            history = contextSummary + '\n\n' + history;
+        }
+
         return history;
+    }
+
+    _generateContextSummary() {
+        // Extract key information from recent tool calls
+        const recentToolCalls = this._recentToolCalls.slice(-3); // Get last 3 tool calls
+        if (recentToolCalls.length === 0) return null;
+
+        let summary = 'Recent Context:\n';
+        
+        recentToolCalls.forEach(calls => {
+            calls.forEach(call => {
+                if (call.name === 'web_search') {
+                    summary += `• Previous search: "${call.args.query}"\n`;
+                } else if (call.name === 'fetch_web_content') {
+                    summary += `• Fetched content from: ${call.args.urls.join(', ')}\n`;
+                }
+            });
+        });
+
+        return summary;
     }
 
     _addMessage(text, sender, isThinking = false, toolResults = null) {
@@ -1267,19 +1328,112 @@ class LLMChatBox {
                 vertical: true,
                 style_class: `llm-chat-message llm-chat-message-${sender}`
             });
-            const mainContent = new St.Label({
+
+            // Create main content
+            const mainContent = new St.BoxLayout({
+                vertical: true,
+                style_class: 'llm-chat-message-content'
+            });
+
+            // Add the main text
+            const textLabel = new St.Label({
                 text: mainText,
-                style_class: 'llm-chat-message-content',
                 x_expand: true
             });
-            mainContent.clutter_text.line_wrap = true;
-            mainContent.clutter_text.line_wrap_mode = Pango.WrapMode.WORD_CHAR;
-            mainContent.clutter_text.ellipsize = Pango.EllipsizeMode.NONE;
-            mainContent.clutter_text.single_line_mode = false;
+            textLabel.clutter_text.line_wrap = true;
+            textLabel.clutter_text.line_wrap_mode = Pango.WrapMode.WORD_CHAR;
+            textLabel.clutter_text.ellipsize = Pango.EllipsizeMode.NONE;
+            textLabel.clutter_text.single_line_mode = false;
+            mainContent.add_child(textLabel);
+
+            // Add sources if this is an AI message with tool results
+            if (sender === 'ai' && toolResults) {
+                const sources = this._extractSources(toolResults);
+                if (sources && sources.length > 0) {
+                    // Add a separator with improved styling
+                    const separator = new St.Label({
+                        text: '\n---\nSources and Citations:',
+                        style_class: 'llm-chat-sources-header'
+                    });
+                    mainContent.add_child(separator);
+
+                    // Add each source with improved formatting
+                    sources.forEach(source => {
+                        const sourceBox = new St.BoxLayout({
+                            vertical: true,
+                            style_class: 'llm-chat-source-box'
+                        });
+
+                        // Create title and URL container
+                        const titleBox = new St.BoxLayout({
+                            vertical: false,
+                            style_class: 'llm-chat-source-title-box'
+                        });
+
+                        // Create clickable URL button with title
+                        const urlButton = new St.Button({
+                            style_class: 'llm-chat-url-button',
+                            label: source.title || source.url
+                        });
+                        urlButton.connect('clicked', () => {
+                            Gio.AppInfo.launch_default_for_uri(source.url, null);
+                        });
+
+                        // Add URL text with improved styling
+                        const urlText = new St.Label({
+                            text: source.url,
+                            style_class: 'llm-chat-url-text'
+                        });
+
+                        // Add source attribution if available
+                        if (source.source) {
+                            const sourceText = new St.Label({
+                                text: `Source: ${source.source}`,
+                                style_class: 'llm-chat-source-text'
+                            });
+                            sourceBox.add_child(sourceText);
+                        }
+
+                        // Add published date if available
+                        if (source.published_date) {
+                            const dateText = new St.Label({
+                                text: `Published: ${source.published_date}`,
+                                style_class: 'llm-chat-date-text'
+                            });
+                            sourceBox.add_child(dateText);
+                        }
+
+                        titleBox.add_child(urlButton);
+                        titleBox.add_child(urlText);
+                        sourceBox.add_child(titleBox);
+                        mainContent.add_child(sourceBox);
+                    });
+                }
+            }
+
             messageActor.add_child(mainContent);
             this._messageContainer.add_child(messageActor);
             this._scrollToBottom();
         }
+    }
+
+    _extractSources(toolResults) {
+        const sources = [];
+        toolResults.forEach(result => {
+            if (result.name === 'web_search' && result.result && result.result.sources) {
+                sources.push(...result.result.sources);
+            } else if (result.name === 'fetch_web_content' && result.result && result.result.results) {
+                result.result.results.forEach(contentResult => {
+                    if (contentResult.url) {
+                        sources.push({
+                            title: contentResult.title || contentResult.url,
+                            url: contentResult.url
+                        });
+                    }
+                });
+            }
+        });
+        return sources;
     }
 
     _scrollToBottom() {
@@ -1349,11 +1503,28 @@ class LLMChatBox {
 
             // Add only essential result data based on tool type
             if (result.name === 'web_search') {
-                optimized.summary = result.result?.summary || '';
                 optimized.query = result.arguments?.query || '';
+                if (result.result?.structured_results) {
+                    optimized.summary = result.result.structured_results.top_results
+                        .map(item => `${item.title} (${item.source})`)
+                        .join(', ');
+                    optimized.metadata = {
+                        total_results: result.result.structured_results.total_results,
+                        top_sources: result.result.structured_results.top_results
+                            .map(item => item.source)
+                            .filter((source, index, self) => self.indexOf(source) === index)
+                    };
+                } else {
+                    optimized.summary = result.result?.summary || '';
+                }
             } else if (result.name === 'fetch_web_content') {
                 optimized.urls = result.arguments?.urls || [];
                 optimized.status = result.result?.status || 'unknown';
+                if (result.result?.results) {
+                    optimized.summary = result.result.results
+                        .map(item => item.title || item.url)
+                        .join(', ');
+                }
             } else if (result.name === 'system_context') {
                 optimized.type = result.arguments?.type || '';
                 optimized.summary = result.result?.formatted_list || '';
@@ -1395,57 +1566,6 @@ class LLMChatBox {
         }
         
         log(`New session started with ID: ${this._sessionId}`);
-    }
-
-    _getToolSystemPrompt() {
-        // Get the formatted tool descriptions from all loaded tools
-        const toolsArray = toolLoader.getTools();
-        const toolDescriptions = toolsArray.map(tool => {
-            return `Tool: ${tool.name}
-Description: ${tool.description}
-Category: ${tool.category}
-Parameters: ${JSON.stringify(tool.parameters, null, 2)}`;
-        }).join('\n\n');
-
-        // Return the formatted prompt with general guidance to prevent loops
-        return `You are a helpful assistant that has access to tools. You must understand when to use these tools to respond to user queries.
-
-Available tools:
-
-${toolDescriptions}
-
-TOOL USAGE INSTRUCTIONS - FOLLOW THESE EXACTLY:
-
-1. When a user asks something that requires a tool, you MUST respond ONLY with a valid JSON object in this format:
-{
-    "tool": "tool_name",
-    "arguments": {
-        "param1": "value1",
-        "param2": "value2"
-    }
-}
-
-2. Do NOT include ANY explanatory text, markdown, or code formatting when using a tool.
-3. Do NOT include backticks (\`\`\`) or any other text before or after the JSON.
-4. ONLY output the raw JSON object - nothing else.
-5. Make sure your JSON is valid and properly formatted.
-
-IMPORTANT LOOP PREVENTION GUIDELINES:
-
-1. DO NOT request the same tool with the same arguments twice in a row.
-2. After receiving tool results, prioritize providing a natural language response over making additional tool calls.
-3. Only request additional tools when you genuinely need more information that wasn't provided in the first result.
-4. You are limited to 10 tool calls per conversation chain.
-
-EXAMPLES:
-
-To get the current time:
-{"tool": "time_date", "arguments": {"action": "get_current_time"}}
-
-To search the web:
-{"tool": "web_search", "arguments": {"query": "latest news about AI", "engine": "google"}}
-
-If not using a tool, respond conversationally as you normally would.`;
     }
 
     // Clean up settings connection
@@ -1630,11 +1750,12 @@ class Extension {
         }
     }
 }
+
 function init() {
     return new Extension();
 }
 
-// Add CSS for the new tool button
+// Add CSS for the chat interface
 const style = `
 .llm-chat-tool-button {
     padding: 5px 10px;
@@ -1676,6 +1797,63 @@ const style = `
     color: #3584e4;
     text-decoration: underline;
     font-weight: normal;
+}
+
+/* Source citation styles */
+.llm-chat-sources-header {
+    margin-top: 12px;
+    margin-bottom: 8px;
+    color: #666666;
+    font-style: italic;
+    font-weight: bold;
+}
+
+.llm-chat-source-box {
+    margin: 8px 0;
+    padding: 8px 12px;
+    background-color: rgba(255, 255, 255, 0.05);
+    border-radius: 6px;
+    border-left: 3px solid #3584e4;
+}
+
+.llm-chat-source-title-box {
+    margin-bottom: 4px;
+}
+
+.llm-chat-url-button {
+    padding: 2px 4px;
+    border-radius: 3px;
+    background-color: transparent;
+    transition-duration: 200ms;
+    font-weight: bold;
+}
+
+.llm-chat-url-button:hover {
+    background-color: rgba(53, 132, 228, 0.1);
+}
+
+.llm-chat-url-button:active {
+    background-color: rgba(53, 132, 228, 0.2);
+}
+
+.llm-chat-url-text {
+    color: #3584e4;
+    text-decoration: underline;
+    margin-left: 8px;
+    font-size: 0.9em;
+}
+
+.llm-chat-source-text {
+    color: #666666;
+    font-size: 0.9em;
+    margin-top: 4px;
+}
+
+.llm-chat-date-text {
+    color: #666666;
+    font-size: 0.85em;
+    font-style: italic;
+    margin-top: 2px;
 }
 
 /* Thinking content styles */

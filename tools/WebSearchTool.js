@@ -32,7 +32,7 @@ var Tool = GObject.registerClass(
 
             // Log initialization with capabilities and usage guidelines
             log('WebSearchTool initialized with the following capabilities:');
-            log('1. Web search using SearXNG engine');
+            log('1. Web search using Brave Search API');
             log('2. Result formatting with clickable URLs');
             log('3. Source attribution and cache links');
             log('\nUSAGE GUIDELINES:');
@@ -64,207 +64,141 @@ var Tool = GObject.registerClass(
                 try {
                     log(`Searching web for: ${query}`);
 
-                    // Create a new Soup.Message for the POST request
-                    const message = Soup.Message.new('POST', 'https://ooglester.com/search');
+                    // Get the Brave Search API key from settings
+                    const settings = ExtensionUtils.getSettings('org.gnome.shell.extensions.llmchat');
+                    const apiKey = settings.get_string('brave-search-api-key');
+                    
+                    if (!apiKey) {
+                        reject('Brave Search API key is not set. Please set it in the extension settings.');
+                        return;
+                    }
 
-                    // Add headers to mimic a real browser request
-                    message.request_headers.append('Accept', 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8');
-                    message.request_headers.append('Accept-Language', 'en-US,en;q=0.5');
-                    message.request_headers.append('Content-Type', 'application/x-www-form-urlencoded');
-                    message.request_headers.append('Origin', 'https://ooglester.com');
-                    message.request_headers.append('Referer', 'https://ooglester.com/');
-                    message.request_headers.append('User-Agent', 'Mozilla/5.0 (X11; Linux x86_64; rv:109.0) Gecko/20100101 Firefox/115.0');
-                    message.request_headers.append('Connection', 'keep-alive');
-                    message.request_headers.append('Upgrade-Insecure-Requests', '1');
-                    message.request_headers.append('Sec-Fetch-Dest', 'document');
-                    message.request_headers.append('Sec-Fetch-Mode', 'navigate');
-                    message.request_headers.append('Sec-Fetch-Site', 'same-origin');
-                    message.request_headers.append('Sec-Fetch-User', '?1');
-                    message.request_headers.append('Pragma', 'no-cache');
-                    message.request_headers.append('Cache-Control', 'no-cache');
+                    // Create the search request
+                    const message = Soup.Message.new('GET', `https://api.search.brave.com/res/v1/web/search?q=${encodeURIComponent(query)}`);
+                    
+                    // Add headers for Brave Search API
+                    message.request_headers.append('Accept', 'application/json');
+                    message.request_headers.append('X-Subscription-Token', apiKey);
+                    message.request_headers.append('User-Agent', 'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/136.0.0.0 Safari/537.36');
 
-                    // Build form data to match exactly what the browser sends
-                    const formData = [
-                        `q=${encodeURIComponent(query)}`,
-                        'engines=google',
-                        'engines=bing',
-                        'engines=duckduckgo',
-                        'category_general=1',
-                        'language=auto',
-                        'time_range=',
-                        'safesearch=2',
-                        'theme=simple',
-                        'format=html',
-                        'results_on_page=10'
-                    ].join('&');
-
-                    log(`Sending form data: ${formData}`);
-
-                    // Set the request body
-                    message.set_request_body_from_bytes('application/x-www-form-urlencoded', 
-                        new GLib.Bytes(formData));
-
-                    log('Sending POST request with form data...');
+                    log('Sending request to Brave Search API...');
 
                     // Store reference to this for use in callback
                     const self = this;
 
-                    // Send the request using Soup.Session
+                    // Send the request
                     _httpSession.queue_message(message, function (session, msg) {
                         if (msg.status_code !== 200) {
-                            log(`Fetch request failed with status: ${msg.status_code}`);
+                            log(`Search request failed with status: ${msg.status_code}`);
                             reject(`Failed to perform web search. Status: ${msg.status_code}`);
                             return;
                         }
 
-                        const html = msg.response_body.data.toString();
-                        log(`Received HTML response of length: ${html.length}`);
-                        log(`First 500 characters of HTML: ${html.substring(0, 500)}`);
+                        try {
+                            const response = JSON.parse(msg.response_body.data.toString());
+                            log(`Received response from Brave Search API`);
 
-                        // Extract results using a more comprehensive approach
-                        const results = [];
-
-                        // Try multiple patterns to find search results
-                        const patterns = [
-                            // Pattern 1: Standard SearXNG result format
-                            /<article[^>]*class="result[^"]*"[^>]*>([\s\S]*?)<\/article>/g,
-                            // Pattern 2: Alternative result format
-                            /<div[^>]*class="[^"]*result[^"]*"[^>]*>([\s\S]*?)<\/div>/g,
-                            // Pattern 3: Generic search result format
-                            /<div[^>]*class="[^"]*search-result[^"]*"[^>]*>([\s\S]*?)<\/div>/g,
-                            // Pattern 4: New SearXNG format
-                            /<div[^>]*class="[^"]*result-default[^"]*"[^>]*>([\s\S]*?)<\/div>/g,
-                            // Pattern 5: Latest SearXNG format
-                            /<div[^>]*class="[^"]*result[^"]*"[^>]*>([\s\S]*?)<div class="engines">/g
-                        ];
-
-                        log('Starting search result extraction...');
-                        
-                        for (const pattern of patterns) {
-                            let match;
-                            while ((match = pattern.exec(html)) !== null) {
-                                try {
-                                    const resultHtml = match[1];
-                                    log(`Found potential result with pattern: ${pattern.toString().substring(0, 50)}...`);
-                                    log(`Result HTML: ${resultHtml.substring(0, 200)}...`);
-
-                                    // Try multiple patterns for URL extraction
-                                    const urlPatterns = [
-                                        /<a[^>]*href="([^"]+)"[^>]*class="url_header"[^>]*>/,
-                                        /<a[^>]*href="([^"]+)"[^>]*class="[^"]*result-url[^"]*"[^>]*>/,
-                                        /<a[^>]*href="([^"]+)"[^>]*class="[^"]*title[^"]*"[^>]*>/,
-                                        /<a[^>]*href="([^"]+)"[^>]*class="[^"]*result-title[^"]*"[^>]*>/,
-                                        /<a[^>]*href="([^"]+)"[^>]*class="[^"]*url[^"]*"[^>]*>/
-                                    ];
-
-                                    let url = null;
-                                    for (const urlPattern of urlPatterns) {
-                                        const urlMatch = resultHtml.match(urlPattern);
-                                        if (urlMatch) {
-                                            url = urlMatch[1];
-                                            log(`Found URL with pattern: ${urlPattern.toString().substring(0, 50)}...`);
-                                            break;
-                                        }
-                                    }
-
-                                    // Try multiple patterns for title extraction
-                                    const titlePatterns = [
-                                        /<h3[^>]*>[\s\S]*?<a[^>]*>([^<]+)<\/a>/,
-                                        /<div[^>]*class="[^"]*title[^"]*"[^>]*>([^<]+)<\/div>/,
-                                        /<a[^>]*class="[^"]*title[^"]*"[^>]*>([^<]+)<\/a>/,
-                                        /<a[^>]*class="[^"]*result-title[^"]*"[^>]*>([^<]+)<\/a>/,
-                                        /<h3[^>]*>([^<]+)<\/h3>/
-                                    ];
-
-                                    let title = null;
-                                    for (const titlePattern of titlePatterns) {
-                                        const titleMatch = resultHtml.match(titlePattern);
-                                        if (titleMatch) {
-                                            title = titleMatch[1].trim();
-                                            log(`Found title with pattern: ${titlePattern.toString().substring(0, 50)}...`);
-                                            break;
-                                        }
-                                    }
-
-                                    // Try multiple patterns for content extraction
-                                    const contentPatterns = [
-                                        /<p[^>]*class="content"[^>]*>([\s\S]*?)<\/p>/,
-                                        /<div[^>]*class="[^"]*content[^"]*"[^>]*>([\s\S]*?)<\/div>/,
-                                        /<div[^>]*class="[^"]*snippet[^"]*"[^>]*>([\s\S]*?)<\/div>/,
-                                        /<div[^>]*class="[^"]*result-content[^"]*"[^>]*>([\s\S]*?)<\/div>/,
-                                        /<p[^>]*>([\s\S]*?)<\/p>/
-                                    ];
-
-                                    let content = null;
-                                    for (const contentPattern of contentPatterns) {
-                                        const contentMatch = resultHtml.match(contentPattern);
-                                        if (contentMatch) {
-                                            content = contentMatch[1]
-                                                .replace(/<[^>]+>/g, '')
-                                                .replace(/\s+/g, ' ')
-                                                .trim();
-                                            log(`Found content with pattern: ${contentPattern.toString().substring(0, 50)}...`);
-                                            break;
-                                        }
-                                    }
-
-                                    if (url && title) {
-                                        results.push({
-                                            title: title,
-                                            content: content || '',
-                                            url: url
-                                        });
-                                        log(`Added result: ${title}`);
-                                    } else {
-                                        log(`Skipped result - missing URL or title`);
-                                    }
-                                } catch (error) {
-                                    log(`Error processing result: ${error.message}`);
-                                    continue;
-                                }
+                            // Extract results from the Brave Search API response
+                            const results = [];
+                            if (response.web && response.web.results) {
+                                response.web.results.forEach(result => {
+                                    results.push({
+                                        title: result.title,
+                                        content: result.description || '',
+                                        url: result.url,
+                                        // Add additional metadata for better context
+                                        source: result.source || 'Unknown',
+                                        published_date: result.published_date || null,
+                                        language: result.language || 'en',
+                                        relevance_score: result.relevance_score || 0
+                                    });
+                                });
                             }
-                        }
 
-                        log(`Successfully processed ${results.length} results`);
+                            log(`Successfully processed ${results.length} results`);
 
-                        if (results.length === 0) {
-                            reject("No search results found. Please try a different search query.");
-                            return;
-                        }
+                            if (results.length === 0) {
+                                reject("No search results found. Please try a different search query.");
+                                return;
+                            }
 
-                        // Take top 3 results and format them for the AI
-                        const topResults = results.slice(0, 3);
-                        const searchSummary = topResults.map((result, index) => {
-                            return `[${index + 1}] ${result.title}\nURL: ${result.url}\nSummary: ${result.content || 'No summary available'}\n`;
-                        }).join('\n---\n\n');
+                            // Sort results by relevance score if available
+                            results.sort((a, b) => (b.relevance_score || 0) - (a.relevance_score || 0));
 
-                        // Store the results and conversation context
-                        const searchResult = {
-                            type: 'search',
-                            query,
-                            results: topResults,
-                            timestamp: new Date().toISOString()
-                        };
-                        
-                        self._lastSearchResults = results;
-                        self._conversationHistory = [
-                            ...(self._conversationHistory || []),
-                            searchResult
-                        ];
+                            // Take top 5 results (increased from 3) and format them for the AI
+                            const topResults = results.slice(0, 5);
+                            
+                            // Create a more structured format for the AI
+                            const searchSummary = {
+                                query: query,
+                                total_results: results.length,
+                                top_results: topResults.map((result, index) => ({
+                                    rank: index + 1,
+                                    title: result.title,
+                                    url: result.url,
+                                    summary: result.content || 'No summary available',
+                                    source: result.source,
+                                    published_date: result.published_date,
+                                    relevance_score: result.relevance_score
+                                }))
+                            };
 
-                        // Resolve with the search summary
-                        resolve({
-                            summary: searchSummary,
-                            results: topResults,
-                            context: {
+                            // Format the results in a way that's easy for the AI to parse
+                            const formattedResults = topResults.map((result, index) => {
+                                return `[${index + 1}] ${result.title}
+Source: ${result.source}
+URL: ${result.url}
+Published: ${result.published_date || 'Unknown date'}
+Relevance: ${result.relevance_score || 'N/A'}
+Summary: ${result.content || 'No summary available'}
+Citation: [${result.title}](${result.url}) - ${result.source}
+---`;
+                            }).join('\n\n');
+
+                            // Store the results and conversation context
+                            const searchResult = {
+                                type: 'search',
                                 query,
+                                results: topResults,
                                 timestamp: new Date().toISOString(),
-                                conversation_history: self._conversationHistory,
-                                tool_results: searchResult
-                            }
-                        });
-                    });
+                                sources: topResults.map(result => ({
+                                    title: result.title,
+                                    url: result.url,
+                                    source: result.source,
+                                    published_date: result.published_date
+                                })),
+                                metadata: {
+                                    total_results: results.length,
+                                    query_time: new Date().toISOString(),
+                                    language: 'en'
+                                }
+                            };
+                            
+                            self._lastSearchResults = results;
+                            self._conversationHistory = [
+                                ...(self._conversationHistory || []),
+                                searchResult
+                            ];
 
+                            // Resolve with both structured and formatted results
+                            resolve({
+                                summary: formattedResults,
+                                structured_results: searchSummary,
+                                results: topResults,
+                                sources: searchResult.sources,
+                                metadata: searchResult.metadata,
+                                context: {
+                                    query,
+                                    timestamp: new Date().toISOString(),
+                                    conversation_history: self._conversationHistory,
+                                    tool_results: searchResult
+                                }
+                            });
+                        } catch (error) {
+                            log(`Error processing Brave Search API response: ${error.message}`);
+                            reject(`Failed to process search results: ${error.message}`);
+                        }
+                    });
                 } catch (error) {
                     log(`Error in searchWeb: ${error.message}`);
                     reject(`An error occurred while performing the web search: ${error.message}`);
