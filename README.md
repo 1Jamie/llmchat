@@ -96,9 +96,19 @@ Click the settings icon in the extension menu or use GNOME Extensions app to con
 
 1. **Select AI Provider**: Choose from Llamacpp, or Ollama
 2. **API Keys**: Enter your API keys for cloud-based services
+   - Brave Search API key (required for web search functionality)
 3. **Server URLs**: Configure local model server addresses
 4. **Model Settings**: Select models and adjust parameters like temperature
 5. **Response Options**: Set max response length and thinking message visibility
+
+### Getting a Brave Search API Key
+
+To use the web search functionality:
+
+1. Visit [Brave Search API](https://brave.com/search/api/)
+2. Sign up for an API key
+3. Enter your API key in the extension settings
+4. Restart the extension to apply changes
 
 ## Usage
 
@@ -146,9 +156,30 @@ The extension currently includes these tools:
 
 #### WebSearchTool
 - **Name:** `web_search`
-- **Description:** Search the web for information
-- **Functions:** Perform web searches and return results
+- **Description:** Search the web for information using Brave Search API
+- **Functions:** Perform web searches and return results with enhanced relevance and privacy
 - **Example Use:** "Search the web for the latest news about GNOME Shell"
+- **Requirements:** Brave Search API key (configure in settings)
+
+#### FetchContentTool
+- **Name:** `fetch_web_content`
+- **Description:** Fetch and extract content from webpages with intelligent content extraction
+- **Functions:** 
+  - Fetch content from multiple URLs simultaneously
+  - Extract main content with context awareness
+  - Clean and format content for readability
+  - Extract metadata (title, author, date)
+  - Special handling for recipes and articles
+- **Features:**
+  - Smart content extraction algorithms
+  - Context-aware content processing
+  - Automatic content cleaning and formatting
+  - Metadata extraction
+  - Recipe-specific content handling
+- **Example Use:** "Get the recipe from this cooking website" or "Extract the main article content from this news site"
+- **Parameters:**
+  - `urls`: Array of URLs to fetch content from
+  - `context`: Optional context including original query and focus keywords
 
 #### ApplicationManagementTool 
 - **Name:** `application_management`
@@ -221,10 +252,30 @@ Developed by 1jamie
 
 Here's a comprehensive list of commands to test the functionality of the extension:
 
+### Session Management
+```
+start a new chat
+view chat history
+resume previous chat
+delete a chat session
+check session information
+```
+
+### Web Search and Content
+```
+search for latest GNOME news
+search for a specific recipe
+fetch content from a news article
+get recipe instructions from a cooking website
+search for technical documentation
+```
+
 ### Display Management
 ```
 get display information
 get primary display
+set brightness to 50%
+toggle night light
 ```
 
 ### Window Management
@@ -245,6 +296,7 @@ set brightness to 50
 get volume
 set volume to 75
 toggle night light
+get system theme
 ```
 
 ### Workspace Management
@@ -253,6 +305,7 @@ list workspaces
 switch to workspace 1
 create new workspace
 remove last workspace
+move current window to workspace 2
 ```
 
 ### Application Management
@@ -260,6 +313,8 @@ remove last workspace
 list installed applications
 list running applications
 launch firefox
+close firefox
+get application window information
 ```
 
 ### Time and Date
@@ -267,6 +322,7 @@ launch firefox
 get current time
 get current date
 get timezone
+get calendar information
 ```
 
 ### System Context
@@ -274,4 +330,35 @@ get timezone
 show system info
 show window information
 show detailed system information
+get clipboard content
+get selected text
+get CPU usage
+get memory usage
+get running processes
+```
+
+### Tool Integration
+```
+search for a recipe and fetch its instructions
+search for news and get article content
+get system info and launch an application
+search for documentation and open it
+```
+
+### Error Handling
+```
+search with invalid query
+fetch content from invalid URL
+try to access non-existent workspace
+try to launch non-existent application
+```
+
+### UI Testing
+```
+test multi-line input
+check message history scrolling
+verify session history display
+test settings panel
+check tool status messages
+verify source citations
 ```
