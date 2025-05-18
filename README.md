@@ -199,6 +199,11 @@ The extension currently includes these tools:
 - **Functions:** Toggle night light, modify system settings
 - **Example Use:** "Turn on night light" or "Turn down the volume"
 
+#### FileOperationsTool
+- **Name:** `file_operations`
+- **Description:** Perform file and directory operations using safe console commands. Supports listing, reading, writing, copying, moving, deleting, searching, and more. Includes confirmation for dangerous actions.
+- **Example Use:** "Delete the file src/test.txt" or "List all files in the Documents folder"
+
 ### Tool Confirmation for Dangerous Actions
 
 Some tools (such as file operations) may perform dangerous or destructive actions (like deleting files, overwriting data, or changing system settings). To protect users, the extension implements a confirmation system:
