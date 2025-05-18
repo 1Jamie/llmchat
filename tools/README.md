@@ -151,4 +151,54 @@ For extension components, use:
 ```javascript
 const ExtensionUtils = imports.misc.extensionUtils;
 const Me = ExtensionUtils.getCurrentExtension();
-``` 
+```
+
+## Confirmation for Dangerous Actions
+
+Some tools may perform dangerous or destructive actions (such as deleting files, overwriting data, or changing system settings). To protect users, tools should implement a confirmation system:
+
+- Add a `confirm` parameter (boolean) to your tool's parameters.
+- In your `execute()` method, check if the action is dangerous (e.g., `delete`) and if `confirm` is not true.
+- If confirmation is needed, return an object like this:
+  ```js
+  return {
+      confirmation_required: true,
+      summary: '⚠️ Confirmation required for dangerous action.\nAction: delete\nTarget: ...',
+      params: { ...params, confirm: true }
+  };
+  ```
+- The UI will show an inline confirmation prompt. Only after the user confirms will the tool be executed with `confirm: true`.
+- On success or error, always return a user-friendly `message` property in your result object.
+
+### Example (in your tool's execute method):
+```js
+if (action === 'delete' && !confirm) {
+    return {
+        confirmation_required: true,
+        summary: `⚠️ Confirmation required for dangerous action.\nAction: delete\nTarget: ${text_input}`,
+        params: { ...params, confirm: true }
+    };
+}
+```
+
+On success:
+```js
+return {
+    success: true,
+    action,
+    result,
+    message: `✅ Action '${action}' succeeded on ${text_input}`
+};
+```
+On error:
+```js
+return {
+    success: false,
+    action,
+    result: null,
+    message: `❌ Action '${action}' failed on ${text_input}: ${error.message}`,
+    error: `Failed to execute tool: ${error.message}`
+};
+```
+
+The extension will handle confirmation dialogs and only execute the tool after the user approves. 

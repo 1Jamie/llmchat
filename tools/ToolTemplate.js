@@ -70,6 +70,13 @@ class ToolTemplate extends BaseTool {
                     type: 'string',
                     description: 'An optional parameter that has a default value',
                     optional: true
+                },
+                
+                // Add a confirm parameter for dangerous actions
+                confirm: {
+                    type: 'boolean',
+                    description: 'Set to true to confirm dangerous or destructive actions (optional, only needed for actions that require confirmation)',
+                    optional: true
                 }
             }
         });
@@ -88,12 +95,22 @@ class ToolTemplate extends BaseTool {
             count = 1, 
             enable_feature = false, 
             action = 'read',
-            optional_param = 'default value'
+            optional_param = 'default value',
+            confirm = false // Add confirm param
         } = params;
         
         // Validate required parameters
         if (!text_input) {
             return { error: 'text_input parameter is required' };
+        }
+        
+        // Example: Require confirmation for 'delete' action
+        if (action === 'delete' && !confirm) {
+            return {
+                confirmation_required: true,
+                summary: `⚠️ Confirmation required for dangerous action.\nAction: delete\nTarget: ${text_input}`,
+                params: { ...params, confirm: true }
+            };
         }
         
         try {
@@ -119,12 +136,12 @@ class ToolTemplate extends BaseTool {
                     return { error: `Invalid action: ${action}` };
             }
             
-            // Return successful result with data
+            // Return successful result with data and a user-friendly message
             return { 
                 success: true,
                 action: action,
                 result: result,
-                // Include any other useful information
+                message: `✅ Action '${action}' succeeded on ${text_input}`,
                 timestamp: new Date().toISOString()
             };
         } catch (error) {
@@ -132,6 +149,10 @@ class ToolTemplate extends BaseTool {
             log(`Error in template tool: ${error.message}`);
             log(`Stack trace: ${error.stack}`);
             return { 
+                success: false,
+                action: action,
+                result: null,
+                message: `❌ Action '${action}' failed on ${text_input}: ${error.message}`,
                 error: `Failed to execute tool: ${error.message}`
             };
         }

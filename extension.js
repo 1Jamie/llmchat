@@ -977,8 +977,6 @@ class LLMChatBox {
             return new Promise((resolve, reject) => {
                 try {
                     log(`Executing tool call: ${toolCall.function.name} with args: ${toolCall.function.arguments}`);
-                    
-                    // Parse arguments again to be safe
                     let args;
                     try {
                         args = JSON.parse(toolCall.function.arguments);
@@ -986,31 +984,60 @@ class LLMChatBox {
                         log(`Failed to parse arguments JSON: ${e.message}, using as-is`);
                         args = toolCall.function.arguments;
                     }
-                    
+                    const runTool = (toolCallObj) => {
+                        const result = this._executeToolCall(toolCallObj);
+                        if (result instanceof Promise) {
+                            result.then(r => resolve({
+                                toolName: toolCallObj.name,
+                                args: toolCallObj.arguments,
+                                result: r
+                            })).catch(reject);
+                        } else {
+                            resolve({
+                                toolName: toolCallObj.name,
+                                args: toolCallObj.arguments,
+                                result: result
+                            });
+                        }
+                    };
+                    // First run the tool call
                     const result = this._executeToolCall({
                         name: toolCall.function.name,
                         arguments: args
                     });
-                    
-                    if (result instanceof Promise) {
-                        result.then(r => {
-                            log(`Tool ${toolCall.function.name} returned Promise result: ${JSON.stringify(r)}`);
+                    const handleResult = (r) => {
+                        if (r && r.confirmation_required) {
+                            this._addConfirmationMessage(r.summary, r.params).then(() => {
+                                // On confirm, run the tool call with confirm: true
+                                const confirmedToolCall = {
+                                    name: r.params.tool || r.params.tool_name || toolCall.function.name,
+                                    arguments: r.params
+                                };
+                                runTool(confirmedToolCall);
+                            }).catch(() => {
+                                // If denied, resolve with error result
                             resolve({
                                 toolName: toolCall.function.name,
                                 args: args,
-                                result: r
+                                    result: { error: 'Action was not confirmed by the user.' }
                             });
-                        }).catch(e => {
+                        });
+                            return;
+                        }
+                        log(`Tool ${toolCall.function.name} returned result: ${JSON.stringify(r)}`);
+                        resolve({
+                            toolName: toolCall.function.name,
+                            args: args,
+                            result: r
+                        });
+                    };
+                    if (result instanceof Promise) {
+                        result.then(handleResult).catch(e => {
                             log(`Tool ${toolCall.function.name} Promise error: ${e.message}`);
                             reject(e);
                         });
                     } else {
-                        log(`Tool ${toolCall.function.name} returned result: ${JSON.stringify(result)}`);
-                        resolve({
-                            toolName: toolCall.function.name,
-                            args: args,
-                            result: result
-                        });
+                        handleResult(result);
                     }
                 } catch (error) {
                     log(`Error executing tool call: ${error.message}`);
@@ -1023,6 +1050,14 @@ class LLMChatBox {
         Promise.all(toolPromises)
             .then(results => {
                 log(`All tool calls completed, processing results`);
+                // Show user-friendly status message for each tool result
+                results.forEach(result => {
+                    if (result.result && result.result.message) {
+                        this._addMessage(result.result.message, 'system');
+                    } else if (result.result && result.result.error) {
+                        this._addMessage(`❌ Tool error: ${result.result.error}`, 'system');
+                    }
+                });
                 
                 // Create a better format for the results that includes tool name and args
                 const toolResults = results.map(result => ({
@@ -1947,6 +1982,53 @@ class LLMChatBox {
         };
 
         this._sessionManager.saveSession(this._sessionId, this._messages, metadata);
+    }
+
+    // Update _addConfirmationMessage to return a Promise that resolves on confirm
+    _addConfirmationMessage(summary, params) {
+        return new Promise((resolve, reject) => {
+            const messageActor = new St.BoxLayout({
+                vertical: true,
+                style_class: 'llm-chat-message llm-chat-message-system llm-chat-confirmation-message'
+            });
+            const mainContent = new St.BoxLayout({
+                vertical: true,
+                style_class: 'llm-chat-message-content'
+            });
+            const textLabel = new St.Label({
+                text: summary + '\n',
+                x_expand: true
+            });
+            textLabel.clutter_text.line_wrap = true;
+            textLabel.clutter_text.line_wrap_mode = Pango.WrapMode.WORD_CHAR;
+            textLabel.clutter_text.ellipsize = Pango.EllipsizeMode.NONE;
+            textLabel.clutter_text.single_line_mode = false;
+            mainContent.add_child(textLabel);
+            // Add confirm and cancel buttons
+            const buttonBox = new St.BoxLayout({ vertical: false });
+            const confirmButton = new St.Button({
+                style_class: 'llm-chat-confirm-button',
+                label: 'Confirm'
+            });
+            const cancelButton = new St.Button({
+                style_class: 'llm-chat-cancel-button',
+                label: 'Cancel'
+            });
+            confirmButton.connect('clicked', () => {
+                this._messageContainer.remove_child(messageActor);
+                resolve();
+            });
+            cancelButton.connect('clicked', () => {
+                this._messageContainer.remove_child(messageActor);
+                reject();
+            });
+            buttonBox.add_child(confirmButton);
+            buttonBox.add_child(cancelButton);
+            mainContent.add_child(buttonBox);
+            messageActor.add_child(mainContent);
+            this._messageContainer.add_child(messageActor);
+            this._scrollToBottom();
+        });
     }
 }
 

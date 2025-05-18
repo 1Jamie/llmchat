@@ -199,6 +199,40 @@ The extension currently includes these tools:
 - **Functions:** Toggle night light, modify system settings
 - **Example Use:** "Turn on night light" or "Turn down the volume"
 
+### Tool Confirmation for Dangerous Actions
+
+Some tools (such as file operations) may perform dangerous or destructive actions (like deleting files, overwriting data, or changing system settings). To protect users, the extension implements a confirmation system:
+
+- Tools that support dangerous actions include a `confirm` parameter in their schema.
+- When a dangerous action is requested (e.g., `delete`), the tool will return a response like:
+  ```js
+  return {
+      confirmation_required: true,
+      summary: '⚠️ Confirmation required for dangerous action.\nAction: delete\nTarget: ...',
+      params: { ...params, confirm: true }
+  };
+  ```
+- The chat UI will display an inline confirmation prompt. Only after you confirm will the tool be executed.
+- On success or error, the tool will return a user-friendly `message` property, which is shown in the chat.
+
+#### Example (for tool authors):
+```js
+if (action === 'delete' && !confirm) {
+    return {
+        confirmation_required: true,
+        summary: `⚠️ Confirmation required for dangerous action.\nAction: delete\nTarget: ${text_input}`,
+        params: { ...params, confirm: true }
+    };
+}
+```
+
+#### For Users
+- When you request a dangerous action, you will see a confirmation dialog in the chat.
+- The action will only proceed after you confirm.
+- This helps prevent accidental or unintended destructive operations.
+
+See the tools/README.md for more details on implementing confirmation in custom tools.
+
 ### Creating Custom Tools
 
 You can create your own tools to extend the capability of the extension. The process is as follows:
