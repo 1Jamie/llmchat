@@ -103,10 +103,10 @@ var Tool = GObject.registerClass(
 
             // Return a Promise that resolves with the fetch results
             return new Promise((resolve, reject) => {
-                const warmupMessage = Soup.Message.new('GET', 'https://example.com');
-                _httpSession.queue_message(warmupMessage, (session, msg) => {
-                    log('Network warm-up complete, status: ' + msg.status_code);
-                    // Now proceed with the real search
+            const warmupMessage = Soup.Message.new('GET', 'https://example.com');
+            _httpSession.queue_message(warmupMessage, (session, msg) => {
+                log('Network warm-up complete, status: ' + msg.status_code);
+                // Now proceed with the real search
                     this.fetchMultipleUrls(validUrls, context)
                         .then(resolve)
                         .catch(reject);
@@ -140,11 +140,11 @@ var Tool = GObject.registerClass(
                             }
 
                             message = Soup.Message.new('GET', url);
-                            
+                        
                             // Enhanced headers for better compatibility
-                            message.request_headers.append('Accept', 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8');
-                            message.request_headers.append('Accept-Language', 'en-US,en;q=0.9');
-                            message.request_headers.append('User-Agent', 'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/136.0.0.0 Safari/537.36');
+                        message.request_headers.append('Accept', 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8');
+                        message.request_headers.append('Accept-Language', 'en-US,en;q=0.9');
+                        message.request_headers.append('User-Agent', 'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/136.0.0.0 Safari/537.36');
                             message.request_headers.append('Cache-Control', 'no-cache');
                             message.request_headers.append('Pragma', 'no-cache');
                             
@@ -246,13 +246,13 @@ var Tool = GObject.registerClass(
                                             bodyText = bodyText.replace(/\s+/g, ' ').trim();
                                             mainContent = bodyText;
                                             log(`Full body text extracted for ${url}, length: ${mainContent.length}`);
-                                        }
+                                            }
                                         
                                         if (mainContent && mainContent.trim().length > 0) {
                                             log(`Processing extracted content for ${url}`);
                                             // Clean and format content
                                             const { cleanContent, formattedContent } = this._cleanAndFormatContent(mainContent, metadata);
-                                            
+
                                             // Calculate relevance score and focus matches
                                             const { relevanceScore, focusMatches } = this._calculateRelevance(cleanContent, originalQuery, focusKeywords);
                                             
@@ -335,16 +335,16 @@ var Tool = GObject.registerClass(
                                 ];
 
                                 const finalResult = {
-                                    results: results,
+                                        results: results,
                                     status: hasError ? 'partial' : 'success',
                                     message: hasError ? 'Some URLs failed to fetch' : 'All URLs fetched successfully',
-                                    context: {
-                                        urls,
+                                        context: {
+                                            urls,
                                         context,
-                                        timestamp: new Date().toISOString(),
-                                        conversation_history: self._conversationHistory,
-                                        tool_results: fetchResult
-                                    }
+                                            timestamp: new Date().toISOString(),
+                                            conversation_history: self._conversationHistory,
+                                            tool_results: fetchResult
+                                        }
                                 };
                                 
                                 log(`Returning final result with ${results.length} items`);

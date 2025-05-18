@@ -75,7 +75,7 @@ var Tool = GObject.registerClass(
 
                     // Create the search request
                     const message = Soup.Message.new('GET', `https://api.search.brave.com/res/v1/web/search?q=${encodeURIComponent(query)}`);
-                    
+
                     // Add headers for Brave Search API
                     message.request_headers.append('Accept', 'application/json');
                     message.request_headers.append('X-Subscription-Token', apiKey);
@@ -83,26 +83,26 @@ var Tool = GObject.registerClass(
 
                     log('Sending request to Brave Search API...');
 
-                    // Store reference to this for use in callback
-                    const self = this;
+                            // Store reference to this for use in callback
+                            const self = this;
 
                     // Send the request
-                    _httpSession.queue_message(message, function (session, msg) {
-                        if (msg.status_code !== 200) {
-                            log(`Search request failed with status: ${msg.status_code}`);
-                            reject(`Failed to perform web search. Status: ${msg.status_code}`);
-                            return;
-                        }
+                            _httpSession.queue_message(message, function (session, msg) {
+                                if (msg.status_code !== 200) {
+                                    log(`Search request failed with status: ${msg.status_code}`);
+                                    reject(`Failed to perform web search. Status: ${msg.status_code}`);
+                                    return;
+                                }
 
                         try {
                             const response = JSON.parse(msg.response_body.data.toString());
                             log(`Received response from Brave Search API`);
 
                             // Extract results from the Brave Search API response
-                            const results = [];
+                                const results = [];
                             if (response.web && response.web.results) {
                                 response.web.results.forEach(result => {
-                                    results.push({
+                                                results.push({
                                         title: result.title,
                                         content: result.description || '',
                                         url: result.url,
@@ -113,14 +113,14 @@ var Tool = GObject.registerClass(
                                         relevance_score: result.relevance_score || 0
                                     });
                                 });
-                            }
+                                }
 
-                            log(`Successfully processed ${results.length} results`);
+                                log(`Successfully processed ${results.length} results`);
 
-                            if (results.length === 0) {
-                                reject("No search results found. Please try a different search query.");
-                                return;
-                            }
+                                if (results.length === 0) {
+                                    reject("No search results found. Please try a different search query.");
+                                    return;
+                                }
 
                             // Sort results by relevance score if available
                             results.sort((a, b) => (b.relevance_score || 0) - (a.relevance_score || 0));
@@ -155,14 +155,14 @@ Citation: [${result.title}](${result.url}) - ${result.source}
 ---`;
                             }).join('\n\n');
 
-                            // Store the results and conversation context
-                            const searchResult = {
-                                type: 'search',
-                                query,
-                                results: topResults,
-                                timestamp: new Date().toISOString(),
-                                sources: topResults.map(result => ({
-                                    title: result.title,
+                                // Store the results and conversation context
+                                const searchResult = {
+                                    type: 'search',
+                                    query,
+                                    results: topResults,
+                                    timestamp: new Date().toISOString(),
+                                    sources: topResults.map(result => ({
+                                        title: result.title,
                                     url: result.url,
                                     source: result.source,
                                     published_date: result.published_date
@@ -172,27 +172,27 @@ Citation: [${result.title}](${result.url}) - ${result.source}
                                     query_time: new Date().toISOString(),
                                     language: 'en'
                                 }
-                            };
-                            
-                            self._lastSearchResults = results;
-                            self._conversationHistory = [
-                                ...(self._conversationHistory || []),
-                                searchResult
-                            ];
+                                };
+                                
+                                self._lastSearchResults = results;
+                                self._conversationHistory = [
+                                    ...(self._conversationHistory || []),
+                                    searchResult
+                                ];
 
                             // Resolve with both structured and formatted results
-                            resolve({
+                                resolve({
                                 summary: formattedResults,
                                 structured_results: searchSummary,
-                                results: topResults,
-                                sources: searchResult.sources,
+                                    results: topResults,
+                                    sources: searchResult.sources,
                                 metadata: searchResult.metadata,
-                                context: {
-                                    query,
-                                    timestamp: new Date().toISOString(),
-                                    conversation_history: self._conversationHistory,
-                                    tool_results: searchResult
-                                }
+                                    context: {
+                                        query,
+                                        timestamp: new Date().toISOString(),
+                                        conversation_history: self._conversationHistory,
+                                        tool_results: searchResult
+                                    }
                             });
                         } catch (error) {
                             log(`Error processing Brave Search API response: ${error.message}`);

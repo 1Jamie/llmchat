@@ -9,9 +9,13 @@ const PanelMenu = imports.ui.panelMenu;
 const PopupMenu = imports.ui.popupMenu;
 const ExtensionUtils = imports.misc.extensionUtils;
 const Me = ExtensionUtils.getCurrentExtension();
+const Signals = imports.signals;
 
 // Import tool system
 const { ToolLoader } = Me.imports.tools.ToolLoader;
+
+// Import session management
+const { SessionManager } = Me.imports.sessionManager;
 
 // Initialize session for API requests
 const _httpSession = new Soup.Session();
@@ -703,6 +707,40 @@ class LLMChatBox {
         this._toolCallingEnabled = true;
         this._toolCallingToggleButton.label = 'Tools: ON';
         this._toolCallingToggleButton.add_style_class_name('llm-chat-tool-button-selected');
+
+        // Initialize session manager
+        this._sessionManager = new SessionManager();
+        this._sessionId = GLib.uuid_string_random();
+        this._sessionTitle = null;
+
+        // Add session history button
+        const historyIcon = new St.Icon({
+            icon_name: 'document-open-recent-symbolic',
+            icon_size: 16
+        });
+
+        const historyButton = new St.Button({
+            style_class: 'llm-chat-settings-button',
+            child: historyIcon
+        });
+        historyButton.connect('clicked', this._onHistoryButtonClicked.bind(this));
+        buttonBox.add_child(historyButton);
+
+        // Add new chat button
+        const newChatIcon = new St.Icon({
+            icon_name: 'document-new-symbolic',
+            icon_size: 16
+        });
+
+        const newChatButton = new St.Button({
+            style_class: 'llm-chat-settings-button',
+            child: newChatIcon
+        });
+        newChatButton.connect('clicked', this._onNewChatButtonClicked.bind(this));
+        buttonBox.add_child(newChatButton);
+        
+        // Initialize view state
+        this._currentView = 'chat'; // possible values: 'chat', 'history'
     }
 
     _onEntryActivated() {
@@ -809,6 +847,9 @@ class LLMChatBox {
 
         // Add user message
         this._addMessage(message, 'user');
+
+        // Save session after each message
+        this._saveCurrentSession();
 
         // Add thinking message if not hidden
         if (!this._settings.get_boolean('hide-thinking')) {
@@ -1165,7 +1206,7 @@ class LLMChatBox {
                 msg.toolResults.forEach(result => {
                     // Tool call
                     messageText += `Tool Call: {\"tool\": \"${result.name}\", \"arguments\": ${JSON.stringify(result.arguments)}}\n`;
-                    
+
                     // Format tool response based on tool type
                     if (result.name === 'web_search' && result.result && result.result.results) {
                         messageText += 'Web Search Results:\n';
@@ -1187,12 +1228,12 @@ class LLMChatBox {
                             });
                         } else {
                             // Fallback to the old format if structured results aren't available
-                            result.result.results.forEach((item, idx) => {
+                        result.result.results.forEach((item, idx) => {
                                 messageText += `[${idx+1}] ${item.title}\n`;
                                 messageText += `URL: ${item.url}\n`;
                                 messageText += `Summary: ${item.content || 'No summary available'}\n\n`;
-                            });
-                        }
+                        });
+                    }
                     } else if (result.name === 'fetch_web_content' && result.result && result.result.results) {
                         messageText += 'Fetched Content:\n';
                         result.result.results.forEach((item, idx) => {
@@ -1269,7 +1310,7 @@ class LLMChatBox {
         return summary;
     }
 
-    _addMessage(text, sender, isThinking = false, toolResults = null) {
+    _addMessage(text, sender, isThinking = false, toolResults = null, addToHistory = true) {
         // Check for thinking content
         const thinkingMatch = text.match(/<think>([\s\S]*?)<\/think>/);
         let mainText = text;
@@ -1288,7 +1329,7 @@ class LLMChatBox {
                 isThinking: true,
                 toolResults: null
             };
-            this._messages.push(thinkingMessage);
+            if (addToHistory) this._messages.push(thinkingMessage);
 
             // Create a dedicated message actor for thinking
             const thinkingActor = new St.BoxLayout({
@@ -1322,7 +1363,7 @@ class LLMChatBox {
                 isThinking,
                 toolResults: toolResults ? this._optimizeToolResults(toolResults) : null
             };
-            this._messages.push(message);
+            if (addToHistory) this._messages.push(message);
 
             const messageActor = new St.BoxLayout({
                 vertical: true,
@@ -1573,7 +1614,339 @@ class LLMChatBox {
         if (this._settingsChangedId) {
             this._settings.disconnect(this._settingsChangedId);
         }
-        // ... rest of destroy code ...
+        
+        // Save current session
+        if (this._messages.length > 0) {
+            this._saveCurrentSession();
+        }
+        
+        // Clear references
+        this._messages = [];
+        this._currentView = null;
+        
+        // The rest of cleanup is handled by the Extension class
+    }
+
+    _onHistoryButtonClicked() {
+        log('History button clicked');
+        if (this._currentView === 'chat') {
+            // Switch to history view
+            this._showSessionHistoryView();
+        } else {
+            // Already in history view, do nothing
+            log('Already in history view');
+        }
+    }
+    
+    _showSessionHistoryView() {
+        log('Showing session history view');
+
+        // Clear previous content to avoid duplicates
+        if (this._messageContainer) {
+            this._messageContainer.destroy_all_children();
+        }
+
+        this._currentView = 'history';
+        
+        // Save current session if it has messages
+        if (this._messages.length > 0) {
+            this._saveCurrentSession();
+        }
+        
+        // Clear the message container to show history instead
+        this._messageContainer.destroy_all_children();
+        
+        // Create header with back button
+        const headerBox = new St.BoxLayout({
+            vertical: false,
+            style_class: 'session-history-header-box'
+        });
+        
+        // Back button to return to chat
+        const backButton = new St.Button({
+            style_class: 'session-history-back-button',
+            label: 'Back to Chat'
+        });
+        backButton.connect('clicked', () => {
+            this._showChatView();
+        });
+        
+        const headerLabel = new St.Label({
+            text: 'Chat History',
+            style_class: 'session-history-header'
+        });
+        
+        headerBox.add_child(backButton);
+        headerBox.add_child(headerLabel);
+        this._messageContainer.add_child(headerBox);
+        
+        // Create new chat button
+        const newChatBox = new St.BoxLayout({
+            vertical: false,
+            style_class: 'session-history-new-chat-box'
+        });
+        
+        const newChatButton = new St.Button({
+            style_class: 'session-history-new-chat-button',
+            label: 'Start New Chat'
+        });
+        newChatButton.connect('clicked', () => {
+            this._startNewSession();
+            this._showChatView();
+        });
+        
+        newChatBox.add_child(newChatButton);
+        this._messageContainer.add_child(newChatBox);
+        
+        // Add separator
+        const separator = new St.BoxLayout({
+            style_class: 'session-history-separator'
+        });
+        this._messageContainer.add_child(separator);
+        
+        // Get session list and display them
+        const sessions = this._sessionManager.listSessions();
+        
+        if (sessions.length === 0) {
+            const noSessions = new St.Label({
+                text: 'No saved chats',
+                style_class: 'session-history-empty'
+            });
+            this._messageContainer.add_child(noSessions);
+        } else {
+            // Create scrollable container for sessions
+            const sessionsScrollBox = new St.ScrollView({
+                style_class: 'session-history-scrollbox',
+                hscrollbar_policy: St.PolicyType.NEVER,
+                vscrollbar_policy: St.PolicyType.AUTOMATIC
+            });
+            
+            const sessionsBox = new St.BoxLayout({
+                vertical: true,
+                style_class: 'session-history-list'
+            });
+            
+            // Add each session
+            sessions.forEach(session => {
+                const sessionItem = this._createSessionHistoryItem(session);
+                sessionsBox.add_child(sessionItem);
+            });
+            
+            sessionsScrollBox.add_actor(sessionsBox);
+            this._messageContainer.add_child(sessionsScrollBox);
+        }
+        
+        // Disable text entry while in history view
+        this._entryText.set_text('');
+        this._entryText.reactive = false;
+        this._entryText.can_focus = false;
+    }
+    
+    _showChatView() {
+        log('Showing chat view');
+        this._currentView = 'chat';
+        // Clear and rebuild message container with current session
+        this._messageContainer.destroy_all_children();
+        // Restore all messages from the current session, but do not add to history
+        this._messages.forEach(msg => {
+            this._addMessage(msg.text, msg.sender, msg.isThinking, msg.toolResults, false);
+        });
+        // Re-enable text entry
+        this._entryText.reactive = true;
+        this._entryText.can_focus = true;
+        this._entryText.grab_key_focus();
+    }
+    
+    _createSessionHistoryItem(session) {
+        const item = new St.BoxLayout({
+            vertical: true,
+            style_class: 'session-history-item'
+        });
+        
+        // Title and date row
+        const headerBox = new St.BoxLayout({
+            vertical: false,
+            style_class: 'session-history-item-header'
+        });
+        
+        const title = new St.Label({
+            text: session.title || 'Untitled Chat',
+            style_class: 'session-history-item-title'
+        });
+        
+        const date = new St.Label({
+            text: new Date(session.updated_at).toLocaleString(),
+            style_class: 'session-history-item-date'
+        });
+        
+        headerBox.add_child(title);
+        headerBox.add_child(date);
+        
+        // Info row (message count, duration, model/provider)
+        let infoText = `${session.message_count || 0} messages`;
+        if (session.created_at && session.updated_at) {
+            const start = new Date(session.created_at);
+            const end = new Date(session.updated_at);
+            const durationMs = end - start;
+            if (!isNaN(durationMs) && durationMs > 0) {
+                const min = Math.floor(durationMs / 60000);
+                const sec = Math.floor((durationMs % 60000) / 1000);
+                infoText += `  |  Duration: ${min}m ${sec}s`;
+            }
+        }
+        if (session.settings && (session.settings.model || session.settings.provider)) {
+            infoText += '  |  ';
+            if (session.settings.provider) infoText += `Provider: ${session.settings.provider} `;
+            if (session.settings.model) infoText += `Model: ${session.settings.model}`;
+        }
+        const infoRow = new St.Label({
+            text: infoText,
+            style_class: 'session-history-item-info'
+        });
+        
+        // First/last message preview
+        let firstMsg = '';
+        let lastMsg = '';
+        if (session.id && this._sessionManager) {
+            const fullSession = this._sessionManager.loadSession(session.id);
+            if (fullSession && fullSession.messages && fullSession.messages.length > 0) {
+                const first = fullSession.messages[0];
+                const last = fullSession.messages[fullSession.messages.length - 1];
+                if (first && first.text) firstMsg = `First: ${first.sender}: ${first.text.substring(0, 60)}${first.text.length > 60 ? '...' : ''}`;
+                if (last && last.text) lastMsg = `Last: ${last.sender}: ${last.text.substring(0, 60)}${last.text.length > 60 ? '...' : ''}`;
+            }
+        }
+        const firstMsgLabel = new St.Label({
+            text: firstMsg,
+            style_class: 'session-history-item-preview'
+        });
+        const lastMsgLabel = new St.Label({
+            text: lastMsg,
+            style_class: 'session-history-item-preview'
+        });
+        
+        // Preview text (existing summary)
+        const preview = new St.Label({
+            text: session.preview || 'No preview available',
+            style_class: 'session-history-item-preview'
+        });
+        preview.clutter_text.line_wrap = true;
+        preview.clutter_text.line_wrap_mode = Pango.WrapMode.WORD_CHAR;
+        
+        // Buttons row
+        const buttonBox = new St.BoxLayout({
+            vertical: false,
+            style_class: 'session-history-item-buttons'
+        });
+        
+        const resumeButton = new St.Button({
+            label: 'Resume',
+            style_class: 'session-history-button'
+        });
+        resumeButton.connect('clicked', () => {
+            log(`Resume button clicked for session: ${session.id}`);
+            this._loadSession(session.id);
+            this._showChatView();
+        });
+        
+        const deleteButton = new St.Button({
+            label: 'Delete',
+            style_class: 'session-history-button session-history-button-delete'
+        });
+        deleteButton.connect('clicked', () => {
+            log(`Delete button clicked for session: ${session.id}`);
+            this._sessionManager.deleteSession(session.id);
+            // Refresh the history view
+            this._showSessionHistoryView();
+        });
+        
+        buttonBox.add_child(resumeButton);
+        buttonBox.add_child(deleteButton);
+        
+        // Add all components
+        item.add_child(headerBox);
+        item.add_child(infoRow);
+        if (firstMsg) item.add_child(firstMsgLabel);
+        if (lastMsg) item.add_child(lastMsgLabel);
+        item.add_child(preview);
+        item.add_child(buttonBox);
+        
+        return item;
+    }
+    
+    // Update _loadSession to switch to chat view after loading
+    _loadSession(sessionId) {
+        log(`[DEBUG] _loadSession called for session: ${sessionId}`);
+        log(`[DEBUG] Stack trace: ` + (new Error()).stack);
+        const sessionData = this._sessionManager.loadSession(sessionId);
+        if (!sessionData) {
+            log(`Failed to load session: ${sessionId}`);
+            return;
+        }
+
+        // Clear current session
+        this._messages = [];
+        if (this._messageContainer) {
+            this._messageContainer.destroy_all_children();
+        }
+
+        // Set new session data
+        this._sessionId = sessionId;
+        this._sessionTitle = sessionData.title;
+        this._messages = sessionData.messages;
+
+        // Only show chat view, do not render messages here
+        this._showChatView();
+
+        log(`Loaded session: ${sessionId}`);
+    }
+
+    _onNewChatButtonClicked() {
+        this._startNewSession();
+        // Make sure we show chat view
+        if (this._currentView === 'history') {
+            this._showChatView();
+        }
+    }
+
+    _startNewSession() {
+        // Save current session if it has messages
+        if (this._messages.length > 0) {
+            this._saveCurrentSession();
+        }
+
+        // Clear current session
+        this._messages = [];
+        this._sessionId = GLib.uuid_string_random();
+        this._sessionTitle = null;
+        this._lastSearchResults = null;
+        this._lastSearchQuery = null;
+        this._lastSearchUrls.clear();
+        this._toolCallCount = 0;
+        this._recentToolCalls = [];
+
+        // Clear the message container
+        if (this._messageContainer) {
+            this._messageContainer.destroy_all_children();
+        }
+
+        log(`New session started with ID: ${this._sessionId}`);
+    }
+
+    _saveCurrentSession() {
+        if (this._messages.length === 0) return;
+
+        const metadata = {
+            title: this._sessionTitle,
+            created_at: new Date().toISOString(),
+            settings: {
+                provider: this._settings.get_string('service-provider'),
+                model: this._settings.get_string('openai-model'),
+                temperature: this._settings.get_double('openai-temperature')
+            }
+        };
+
+        this._sessionManager.saveSession(this._sessionId, this._messages, metadata);
     }
 }
 
@@ -1754,184 +2127,3 @@ class Extension {
 function init() {
     return new Extension();
 }
-
-// Add CSS for the chat interface
-const style = `
-.llm-chat-tool-button {
-    padding: 5px 10px;
-    border-radius: 4px;
-    background-color: #4a4a4a;
-    color: #ffffff;
-    margin: 0 5px;
-}
-
-.llm-chat-tool-button-selected {
-    background-color: #3584e4;
-}
-
-.llm-chat-tool-button:hover {
-    background-color: #5a5a5a;
-}
-
-.llm-chat-tool-button-selected:hover {
-    background-color: #4a8fe4;
-}
-
-/* Styles for clickable URLs */
-.llm-chat-url-button {
-    padding: 2px 4px;
-    border-radius: 3px;
-    background-color: transparent;
-    transition-duration: 200ms;
-}
-
-.llm-chat-url-button:hover {
-    background-color: rgba(53, 132, 228, 0.1);
-}
-
-.llm-chat-url-button:active {
-    background-color: rgba(53, 132, 228, 0.2);
-}
-
-.llm-chat-url-text {
-    color: #3584e4;
-    text-decoration: underline;
-    font-weight: normal;
-}
-
-/* Source citation styles */
-.llm-chat-sources-header {
-    margin-top: 12px;
-    margin-bottom: 8px;
-    color: #666666;
-    font-style: italic;
-    font-weight: bold;
-}
-
-.llm-chat-source-box {
-    margin: 8px 0;
-    padding: 8px 12px;
-    background-color: rgba(255, 255, 255, 0.05);
-    border-radius: 6px;
-    border-left: 3px solid #3584e4;
-}
-
-.llm-chat-source-title-box {
-    margin-bottom: 4px;
-}
-
-.llm-chat-url-button {
-    padding: 2px 4px;
-    border-radius: 3px;
-    background-color: transparent;
-    transition-duration: 200ms;
-    font-weight: bold;
-}
-
-.llm-chat-url-button:hover {
-    background-color: rgba(53, 132, 228, 0.1);
-}
-
-.llm-chat-url-button:active {
-    background-color: rgba(53, 132, 228, 0.2);
-}
-
-.llm-chat-url-text {
-    color: #3584e4;
-    text-decoration: underline;
-    margin-left: 8px;
-    font-size: 0.9em;
-}
-
-.llm-chat-source-text {
-    color: #666666;
-    font-size: 0.9em;
-    margin-top: 4px;
-}
-
-.llm-chat-date-text {
-    color: #666666;
-    font-size: 0.85em;
-    font-style: italic;
-    margin-top: 2px;
-}
-
-/* Thinking content styles */
-.llm-chat-thinking-container {
-    margin-top: 8px;
-    margin-left: 16px;
-    padding: 8px 12px;
-    border-radius: 6px;
-    background-color: rgba(53, 132, 228, 0.1);
-    border-left: 3px solid #3584e4;
-    transition: all 0.2s ease-in-out;
-}
-
-.llm-chat-thinking-hidden {
-    display: none !important;
-}
-
-.llm-chat-thinking-content {
-    color: #666666;
-    font-size: 0.9em;
-    font-style: italic;
-    line-height: 1.4;
-    white-space: pre-wrap;
-}
-
-/* Message container styles */
-.llm-chat-message {
-    padding: 8px 12px;
-    margin: 4px 0;
-    border-radius: 6px;
-    transition: margin 0.2s ease-in-out;
-}
-
-.llm-chat-message-user {
-    background-color: rgba(53, 132, 228, 0.1);
-}
-
-.llm-chat-message-ai {
-    background-color: rgba(255, 255, 255, 0.05);
-}
-
-.llm-chat-message-system {
-    background-color: rgba(255, 255, 255, 0.02);
-    border-left: 3px solid #666666;
-}
-
-.llm-chat-message-content {
-    padding: 4px 0;
-    line-height: 1.4;
-    white-space: pre-wrap;
-}
-
-/* Scroll view styles */
-.llm-chat-scrollview {
-    background-color: transparent;
-}
-
-.llm-chat-scrollview StScrollBar {
-    min-width: 8px;
-    min-height: 8px;
-}
-
-.llm-chat-scrollview StScrollBar StBin#trough {
-    background-color: rgba(255, 255, 255, 0.1);
-    border-radius: 4px;
-}
-
-.llm-chat-scrollview StScrollBar StButton#vhandle {
-    background-color: rgba(255, 255, 255, 0.2);
-    border-radius: 4px;
-    margin: 2px;
-}
-
-.llm-chat-scrollview StScrollBar StButton#vhandle:hover {
-    background-color: rgba(255, 255, 255, 0.3);
-}
-
-.llm-chat-scrollview StScrollBar StButton#vhandle:active {
-    background-color: rgba(255, 255, 255, 0.4);
-}
-`;

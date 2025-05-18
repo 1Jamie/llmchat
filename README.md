@@ -36,6 +36,36 @@ The only ones verifiable working ~well ish is the ollama provider and llamacpp. 
   - Multi-line text input
   - Smooth scrolling chat history
   - Settings panel for configuration
+  - Session history management
+  - Chat persistence between sessions
+
+## Session Management
+
+The extension now includes comprehensive session management features:
+
+- **Session History**: Access your previous chat sessions through the history panel
+- **Session Information**: View detailed information about each session:
+  - Message count
+  - Session duration
+  - Model and provider details
+  - First and last message previews
+- **Session Controls**:
+  - Resume previous conversations
+  - Start new chat sessions
+  - Delete old sessions
+  - Automatic session saving
+- **Session Persistence**: Chats are automatically saved and persist between extension restarts
+- **Session Metadata**: Each session includes:
+  - Creation and update timestamps
+  - AI model and provider settings
+  - Conversation previews
+  - Message statistics
+
+To access your chat history:
+1. Click the history icon in the chat interface
+2. Browse through your saved sessions
+3. Click "Resume" to continue a previous conversation
+4. Use "New Chat" to start a fresh session
 
 ## Installation
 

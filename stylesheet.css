@@ -1,5 +1,6 @@
 /* stylesheet.css */
 
+/* Main Chat Box */
 .llm-chat-box {
   padding: 10px;
   width: 500px; 
@@ -14,36 +15,66 @@
   overflow: hidden;
 }
 
+/* Scroll View */
 .llm-chat-scrollview {
   flex: 1; 
   overflow-y: auto; 
   margin-bottom: 10px; 
   padding-right: 8px; 
+  background-color: transparent;
 }
 
+.llm-chat-scrollview StScrollBar {
+  min-width: 8px;
+  min-height: 8px;
+}
+
+.llm-chat-scrollview StScrollBar StBin#trough {
+  background-color: rgba(255, 255, 255, 0.1);
+  border-radius: 4px;
+}
+
+.llm-chat-scrollview StScrollBar StButton#vhandle {
+  background-color: rgba(255, 255, 255, 0.2);
+  border-radius: 4px;
+  margin: 2px;
+}
+
+.llm-chat-scrollview StScrollBar StButton#vhandle:hover {
+  background-color: rgba(255, 255, 255, 0.3);
+}
+
+.llm-chat-scrollview StScrollBar StButton#vhandle:active {
+  background-color: rgba(255, 255, 255, 0.4);
+}
+
+/* Messages */
 .llm-chat-message {
-  padding: 8px;
-  margin-bottom: 5px;
-  border-radius: 5px;
-  width: fit-content;
-  max-width: 100%;
+  padding: 8px 12px;
+  margin: 4px 0;
+  border-radius: 6px;
+  transition: margin 0.2s ease-in-out;
 }
 
+/* User message: subtle blue background, white text */
 .llm-chat-message-user {
-  background-color: rgba(60, 120, 216, 0.8);
-  color: white;
+  background-color: rgba(53, 132, 228, 0.1);
+  color: #fff;
   text-align: right;
-   margin-left: 20px;
-
+  margin-left: 20px;
+  font-weight: normal;
 }
 
+/* AI message: subtle white/gray background, white text */
 .llm-chat-message-ai {
-  background-color: rgba(100, 100, 100, 0.8);
-  color: white;
+  background-color: rgba(255, 255, 255, 0.05);
+  color: #fff;
   text-align: left;
   margin-right: 20px;
+  font-weight: normal;
 }
 
+/* System message: subtle gray, italic, border-left */
 .llm-chat-message-system {
   background-color: rgba(70, 70, 70, 0.8);
   color: #aaa;
@@ -51,20 +82,25 @@
   text-align: center;
   margin-left: 40px;
   margin-right: 40px;
+  border-left: 3px solid #666666;
 }
 
-.llm-chat-message-text {
-  color: #eee;
-  font-size: 12pt;
-  white-space: pre-wrap;       
-  word-wrap: break-word;       
-  overflow-wrap: break-word;   
-  max-width: 100%;            
-  min-width: 100px;
+/* Thinking message: subtle blue, italic */
+.llm-chat-thinking-message {
+  background-color: rgba(53, 132, 228, 0.1);
+  color: #666666;
+  font-style: italic;
 }
 
-.llm-chat-text-container{}
+/* Message content: always readable */
+.llm-chat-message-content {
+  padding: 4px 0;
+  line-height: 1.4;
+  color: inherit;
+  white-space: pre-wrap;
+}
 
+/* Input Area */
 .llm-chat-input-box {
   margin-top: auto;           
   width: 100%;               
@@ -74,15 +110,16 @@
   border-radius: 4px;
 }
 
+/* Input area: dark background, white text, subtle border */
 .llm-chat-entry {
-  width: 100%;
-  min-height: 40px;          
   background-color: rgba(40, 40, 40, 0.9);
   color: white;
   border: 1px solid #666;
   border-radius: 4px;
   padding: 8px;
   margin-bottom: 5px;
+  width: 100%;
+  min-height: 40px;
 }
 
 .llm-chat-entry:focus {
@@ -90,9 +127,9 @@
   box-shadow: 0 0 3px rgba(60, 120, 216, 0.5);
 }
 
-.llm-chat-button-box{
-  margin-right: 5px; 
-
+/* Buttons */
+.llm-chat-button-box {
+  margin-right: 5px;
 }
 
 .llm-chat-button, .llm-chat-settings-button {
@@ -103,53 +140,267 @@
   color: white;
   background-color: rgba(80, 80, 80, 0.9);
 }
-/* Initially, style the context button like the others */
-.llm-chat-context-button {
-    padding: 6px 12px;
-  margin-left: 5px;
-  border: 1px solid #666;
-  border-radius: 4px;
-  color: white;
-  background-color: rgba(80, 80, 80, 0.9);
+
+.llm-chat-button:hover, .llm-chat-settings-button:hover {
+  background-color: rgba(100, 100, 100, 0.9);
+  border-color: #888;
 }
 
-/* Style for the SELECTED state of the context button */
-.llm-chat-context-button-selected {
-  background-color: rgba(60, 120, 216, 0.8); 
-  border-color: rgba(60, 120, 216, 0.8); 
+.llm-chat-button:active, .llm-chat-settings-button:active {
+  background-color: rgba(120, 120, 120, 0.9);
+  border-color: #aaa;
 }
 
-/* Tool button styles */
+/* Tool Button */
 .llm-chat-tool-button {
   padding: 5px 10px;
-  margin-left: 5px;
-  border: 1px solid #666;
   border-radius: 4px;
-  color: white;
-  background-color: rgba(80, 80, 80, 0.9);
+  background-color: #4a4a4a;
+  color: #ffffff;
+  margin: 0 5px;
 }
 
 .llm-chat-tool-button-selected {
-  background-color: rgba(53, 132, 228, 0.8);
-  border-color: rgba(53, 132, 228, 0.8);
+  background-color: #3584e4;
 }
 
 .llm-chat-tool-button:hover {
-  background-color: rgba(100, 100, 100, 0.9);
-  border-color: #888;
+  background-color: #5a5a5a;
 }
 
 .llm-chat-tool-button-selected:hover {
-  background-color: rgba(74, 143, 228, 0.9);
-  border-color: rgba(74, 143, 228, 0.9);
+  background-color: #4a8fe4;
 }
 
-.llm-chat-button:hover, .llm-chat-settings-button:hover, .llm-chat-context-button:hover  {
-  background-color: rgba(100, 100, 100, 0.9);
-  border-color: #888;
+/* URL and Source Styles */
+.llm-chat-url-button {
+  padding: 2px 4px;
+  border-radius: 3px;
+  background-color: transparent;
+  transition-duration: 200ms;
 }
 
-.llm-chat-button:active, .llm-chat-settings-button:active, .llm-chat-context-button:active {
-background-color: rgba(120, 120, 120, 0.9);
-  border-color: #aaa;
+.llm-chat-url-button:hover {
+  background-color: rgba(53, 132, 228, 0.1);
+}
+
+.llm-chat-url-button:active {
+  background-color: rgba(53, 132, 228, 0.2);
+}
+
+.llm-chat-url-text {
+  color: #3584e4;
+  text-decoration: underline;
+  font-weight: normal;
+}
+
+.llm-chat-sources-header {
+  margin-top: 12px;
+  margin-bottom: 8px;
+  color: #666666;
+  font-style: italic;
+  font-weight: bold;
+}
+
+.llm-chat-source-box {
+  margin: 8px 0;
+  padding: 8px 12px;
+  background-color: rgba(255, 255, 255, 0.05);
+  border-radius: 6px;
+  border-left: 3px solid #3584e4;
+}
+
+.llm-chat-source-title-box {
+  margin-bottom: 4px;
+}
+
+.llm-chat-source-text {
+  color: #666666;
+  font-size: 0.9em;
+  margin-top: 4px;
+}
+
+.llm-chat-date-text {
+  color: #666666;
+  font-size: 0.85em;
+  font-style: italic;
+  margin-top: 2px;
+}
+
+/* Thinking Content */
+.llm-chat-thinking-container {
+  margin-top: 8px;
+  margin-left: 16px;
+  padding: 8px 12px;
+  border-radius: 6px;
+  background-color: rgba(53, 132, 228, 0.1);
+  border-left: 3px solid #3584e4;
+  transition: all 0.2s ease-in-out;
+}
+
+.llm-chat-thinking-hidden {
+  display: none !important;
+}
+
+.llm-chat-thinking-content {
+  color: #666666;
+  font-size: 0.9em;
+  font-style: italic;
+  line-height: 1.4;
+  white-space: pre-wrap;
+}
+
+/* Session History Styles */
+.session-history-header-box {
+  padding: 12px;
+  background-color: rgba(0, 0, 0, 0.1);
+  border-bottom: 1px solid rgba(255, 255, 255, 0.1);
+}
+
+.session-history-header {
+  font-weight: bold;
+  font-size: 1.1em;
+  padding: 8px 12px;
+}
+
+.session-history-back-button {
+  padding: 4px 8px;
+  border-radius: 4px;
+  background-color: #4a4a4a;
+  color: #ffffff;
+  margin-right: 12px;
+}
+
+.session-history-back-button:hover {
+  background-color: #5a5a5a;
+}
+
+.session-history-new-chat-box {
+  padding: 12px;
+  display: flex;
+  justify-content: center;
+}
+
+.session-history-new-chat-button {
+  padding: 8px 16px;
+  border-radius: 4px;
+  background-color: #3584e4;
+  color: #ffffff;
+  font-weight: bold;
+}
+
+.session-history-new-chat-button:hover {
+  background-color: #4a8fe4;
+}
+
+.session-history-separator {
+  height: 1px;
+  background-color: rgba(255, 255, 255, 0.1);
+  margin: 0 12px;
+}
+
+.session-history-scrollbox {
+  max-height: 400px;
+}
+
+.session-history-list {
+  padding: 8px;
+  max-height: 400px;
+  overflow-y: auto;
+}
+
+/* Session history item styled like chat messages */
+.session-history-item {
+  background-color: rgba(53, 132, 228, 0.10);
+  color: #fff;
+  border-radius: 6px;
+  padding: 12px;
+  margin: 8px 0;
+  box-shadow: 0 1px 2px rgba(0,0,0,0.08);
+  transition: background 0.2s;
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+}
+
+.session-history-item:hover {
+  background-color: rgba(53, 132, 228, 0.18);
+}
+
+.session-history-item-title {
+  font-weight: bold;
+  font-size: 1.1em;
+  color: #fff;
+  margin-bottom: 2px;
+}
+
+.session-history-item-date {
+  color: #b0b8c1;
+  font-size: 0.95em;
+  margin-left: 8px;
+}
+
+.session-history-item-preview {
+  color: #e0e6ed;
+  font-size: 0.98em;
+  margin: 8px 0 0 0;
+  white-space: pre-line;
+}
+
+.session-history-item-buttons {
+  display: flex;
+  flex-direction: row;
+  justify-content: flex-end;
+  gap: 12px;
+  margin-top: 16px;
+  width: 100%;
+}
+
+.session-history-button {
+  min-width: 80px;
+  max-width: 120px;
+  height: 36px;
+  font-size: 1em;
+  font-weight: bold;
+  padding: 0 18px;
+  border-radius: 8px;
+  background-color: #3584e4;
+  color: #fff;
+  margin: 0;
+  transition: background-color 0.2s, box-shadow 0.2s;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border: none;
+  box-shadow: 0 1px 2px rgba(0,0,0,0.10);
+  cursor: pointer;
+  outline: none;
+}
+
+.session-history-button:hover {
+  background-color: #4a8fe4;
+}
+
+.session-history-button.session-history-button-delete {
+  background-color: #c6262e;
+  color: #fff;
+  border-radius: 8px;
+}
+
+.session-history-button.session-history-button-delete:hover {
+  background-color: #e6454a;
+}
+
+.session-history-empty {
+  color: #666666;
+  font-style: italic;
+  padding: 16px;
+  text-align: center;
+}
+
+.session-history-item-info {
+  color: #b0b8c1;
+  font-size: 0.95em;
+  margin: 4px 0 0 0;
+  font-style: italic;
 }
