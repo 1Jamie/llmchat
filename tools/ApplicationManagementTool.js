@@ -4,7 +4,7 @@ const { GObject, Gio, Shell } = imports.gi;
 const Main = imports.ui.main;
 const ExtensionUtils = imports.misc.extensionUtils;
 const Me = ExtensionUtils.getCurrentExtension();
-const { BaseTool } = Me.imports.tools.BaseTool;
+const { BaseTool } = Me.imports.utils.BaseTool;
 
 var Tool = GObject.registerClass(
 class ApplicationManagementTool extends BaseTool {

@@ -3,14 +3,23 @@
 const { GObject, Gio } = imports.gi;
 const ExtensionUtils = imports.misc.extensionUtils;
 const Me = ExtensionUtils.getCurrentExtension();
-const { BaseTool } = Me.imports.tools.BaseTool;
+const { BaseTool } = Me.imports.utils.BaseTool;
 
 var ToolLoader = GObject.registerClass(
 class ToolLoader extends GObject.Object {
     _init() {
         super._init();
-        this.tools = new Map();
+        this._tools = new Map();
+        this._memoryService = null;
         this._availableTools = [];
+    }
+
+    setMemoryService(memoryService) {
+        this._memoryService = memoryService;
+    }
+
+    getMemoryService() {
+        return this._memoryService;
     }
 
     loadTools() {
@@ -29,7 +38,10 @@ class ToolLoader extends GObject.Object {
                         // Look for a Tool class export in the module
                         if (toolModule && toolModule.Tool) {
                             const tool = new toolModule.Tool();
-                            this.tools.set(tool.name, tool);
+                            if (this._memoryService) {
+                                tool.setMemoryService(this._memoryService);
+                            }
+                            this._tools.set(tool.name, tool);
                             
                             // Add to available tools list in the format expected by the system
                             this._availableTools.push({
@@ -55,7 +67,7 @@ class ToolLoader extends GObject.Object {
     }
 
     getTools() {
-        return Array.from(this.tools.values());
+        return Array.from(this._tools.values());
     }
 
     getToolsAsSchemaArray() {
@@ -74,6 +86,6 @@ class ToolLoader extends GObject.Object {
     }
 
     getTool(name) {
-        return this.tools.get(name);
+        return this._tools.get(name);
     }
 }); 

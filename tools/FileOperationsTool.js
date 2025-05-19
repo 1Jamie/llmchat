@@ -3,13 +3,20 @@
 const { GObject, Gio, GLib } = imports.gi;
 const ExtensionUtils = imports.misc.extensionUtils;
 const Me = ExtensionUtils.getCurrentExtension();
-const { BaseTool } = Me.imports.tools.BaseTool;
+const { BaseTool } = Me.imports.utils.BaseTool;
 
 // Helper: restrict all file operations to user's home directory
 const HOME_DIR = GLib.get_home_dir();
+function expandHome(path) {
+    if (!path) return path;
+    if (path === '~') return HOME_DIR;
+    if (path.startsWith('~/')) return HOME_DIR + path.slice(1);
+    return path;
+}
 function isSafePath(path) {
     if (!path) return false;
-    const absPath = GLib.build_filenamev([path.startsWith('/') ? path : `${HOME_DIR}/${path}`]);
+    const expanded = expandHome(path);
+    const absPath = GLib.build_filenamev([expanded.startsWith('/') ? expanded : `${HOME_DIR}/${expanded}`]);
     return absPath.startsWith(HOME_DIR);
 }
 
@@ -32,7 +39,7 @@ class FileOperationsTool extends BaseTool {
     _init() {
         super._init({
             name: 'file_operations',
-            description: 'Perform file and directory operations using safe console commands. Supports listing, reading, writing, copying, moving, deleting, searching, and more.',
+            description: 'Perform file and directory operations using safe console commands. Only files and directories within your home directory (~/) are allowed. Use relative paths starting with ~/ (e.g., ~/Documents) to access files and folders. Absolute or system paths are not permitted. Example: {"tool": "file_operations", "arguments": {"action": "list", "path": "~/Documents"}}. Supports listing, reading, writing, copying, moving, deleting, searching, and more.',
             category: 'system',
             parameters: {
                 action: {
@@ -46,7 +53,7 @@ class FileOperationsTool extends BaseTool {
                 },
                 path: {
                     type: 'string',
-                    description: 'Path to the file or directory'
+                    description: 'Path to the file or directory. Only paths within your home directory are allowed. Use relative paths starting with ~/ (e.g., ~/Documents).'
                 },
                 target: {
                     type: 'string',
@@ -76,8 +83,10 @@ class FileOperationsTool extends BaseTool {
         const { action, path, target, content, pattern, options, confirm } = params;
         if (!action) return { error: 'Missing action parameter' };
         let cmd = [];
-        let safePath = path && isSafePath(path) ? path : null;
-        let safeTarget = target && isSafePath(target) ? target : null;
+        let expandedPath = path ? expandHome(path) : null;
+        let expandedTarget = target ? expandHome(target) : null;
+        let safePath = expandedPath && isSafePath(expandedPath) ? expandedPath : null;
+        let safeTarget = expandedTarget && isSafePath(expandedTarget) ? expandedTarget : null;
         // Only allow actions within home dir
         if (path && !safePath) return { error: 'Path is not allowed' };
         if (target && !safeTarget) return { error: 'Target path is not allowed' };

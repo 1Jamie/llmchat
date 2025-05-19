@@ -1,0 +1,29 @@
+# Log files
+logs/
+*.log
+
+# Embeddings directory
+embeddings/
+embeddings/*/
+
+# Python cache files
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Environment files
+.env
+.venv
+env/
+venv/
+ENV/
+
+# IDE files
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS files
+.DS_Store
+Thumbs.db 

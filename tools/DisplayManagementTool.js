@@ -5,7 +5,7 @@ const Meta = imports.gi.Meta;
 const Main = imports.ui.main;
 const ExtensionUtils = imports.misc.extensionUtils;
 const Me = ExtensionUtils.getCurrentExtension();
-const { BaseTool } = Me.imports.tools.BaseTool;
+const { BaseTool } = Me.imports.utils.BaseTool;
 
 var Tool = GObject.registerClass(
 class DisplayManagementTool extends BaseTool {

@@ -12,8 +12,9 @@ const Me = ExtensionUtils.getCurrentExtension();
 const Signals = imports.signals;
 
 // Import tool system
-const { ToolLoader } = Me.imports.tools.ToolLoader;
-const { SystemPrompt } = Me.imports.tools.SystemPrompt;
+const { ToolLoader } = Me.imports.utils.ToolLoader;
+// Import our new MemoryService
+const { MemoryService } = Me.imports.services.MemoryService;
 
 // Import session management
 const { SessionManager } = Me.imports.sessionManager;
@@ -21,48 +22,244 @@ const { SessionManager } = Me.imports.sessionManager;
 // Initialize session for API requests
 const _httpSession = new Soup.Session();
 
+// Initialize memory service for RAG
+let memoryService = null;
+try {
+    memoryService = MemoryService.getInstance();
+    // Start initialization asynchronously only if not already initialized
+    if (!memoryService._initialized) {
+        GLib.timeout_add(GLib.PRIORITY_DEFAULT, 0, () => {
+            memoryService._startInitialization().catch(e => {
+                log(`Error starting memory system initialization: ${e.message}`);
+            });
+            return GLib.SOURCE_REMOVE;
+        });
+    }
+} catch (e) {
+    log(`Error creating memory service: ${e.message}`);
+}
+
 // Initialize tool loader
 const toolLoader = new ToolLoader();
+toolLoader.setMemoryService(memoryService);
 toolLoader.loadTools();
 
 // Provider Adapter class to handle different AI providers
 class ProviderAdapter {
     constructor(settings) {
         this._settings = settings;
+        this._initialized = false;
+        this._initializationPromise = null;
+        
+        // Initialize the memory system asynchronously
+        GLib.timeout_add(GLib.PRIORITY_DEFAULT, 0, () => {
+            this._initializeMemorySystem().catch(e => {
+                log(`Error initializing memory system: ${e.message}`);
+            });
+            return GLib.SOURCE_REMOVE;
+        });
+    }
+    
+    async _initializeMemorySystem() {
+        if (this._initializationPromise) {
+            return this._initializationPromise;
+        }
+
+        this._initializationPromise = (async () => {
+            try {
+                // Use the existing memory service instance
+                if (memoryService) {
+                    await memoryService.waitForInitialization();
+                    this._initialized = true;
+                    log('Memory system initialized successfully');
+                } else {
+                    log('Memory service not available');
+                    this._initialized = true; // Still mark as initialized to allow operation without memory
+                }
+            } catch (e) {
+                log(`Error in memory system initialization: ${e.message}`);
+                this._initialized = true; // Mark as initialized even if memory system fails
+            }
+        })();
+
+        return this._initializationPromise;
     }
 
     // Common interface for all providers
     async makeRequest(text, toolCalls = null) {
+        // Ensure memory system is initialized before proceeding
+        if (!this._initialized) {
+            try {
+                await this._initializeMemorySystem();
+            } catch (e) {
+                log(`Failed to initialize memory system: ${e.message}`);
+                // Continue without memory system if initialization fails
+            }
+        }
+
         const provider = this._settings.get_string('service-provider');
         log(`Making request to provider: ${provider}, tool calling: ${toolCalls ? 'enabled' : 'disabled'}`);
         
         try {
+            // Extract just the user's query from the conversation history
+            const userQuery = text.split('\n').filter(line => line.startsWith('User: ')).pop()?.replace('User: ', '') || text;
+            log(`Processing query: ${userQuery}`);
+            
+            let relevantToolsPrompt = '';
+            let relevantMemories = [];
+            
+            if (memoryService && memoryService._initialized) {
+                try {
+                    // Step 1: Get relevant tools
+                    log(`Searching for relevant tools for query: ${userQuery}`);
+                    const relevantTools = await memoryService.getRelevantToolDescriptions(userQuery);
+                    relevantToolsPrompt = relevantTools.raw_prompt;
+                    toolCalls = relevantTools.functions;
+                    log(`Retrieved ${relevantTools.descriptions.length} relevant tools for the query`);
+                    
+                    // Step 2: Get relevant memories
+                    log(`Searching for relevant memories for query: ${userQuery}`);
+                    relevantMemories = await memoryService.getRelevantMemories(userQuery);
+                    log(`Retrieved ${relevantMemories.length} relevant memories for the query`);
+                    
+                    // Step 3: Add memories to the conversation context
+                    if (relevantMemories.length > 0) {
+                        const memoryContext = this._formatMemoryContext(relevantMemories);
+                        
+                        // Add memories to the conversation history
+                        text = `${text}\n\nRelevant context from previous conversations:\n${memoryContext}`;
+                    }
+                } catch (e) {
+                    log(`Error retrieving relevant tools or memories: ${e.message}`);
+                    // If memory service fails, we'll proceed without the relevant tools/memories
+                }
+            }
+            
             let response;
-        switch (provider) {
-            case 'openai':
-                    response = await this._makeOpenAIRequest(text, toolCalls);
+            switch (provider) {
+                case 'openai':
+                    response = await this._makeOpenAIRequest(text, toolCalls, relevantToolsPrompt);
                     break;
-            case 'gemini':
-                    response = await this._makeGeminiRequest(text, toolCalls);
+                case 'gemini':
+                    response = await this._makeGeminiRequest(text, toolCalls, relevantToolsPrompt);
                     break;
-            case 'anthropic':
-                    response = await this._makeAnthropicRequest(text, toolCalls);
+                case 'anthropic':
+                    response = await this._makeAnthropicRequest(text, toolCalls, relevantToolsPrompt);
                     break;
-            case 'llama':
-                    response = await this._makeLlamaRequest(text, toolCalls);
+                case 'llama':
+                    response = await this._makeLlamaRequest(text, toolCalls, relevantToolsPrompt);
                     break;
-            case 'ollama':
-                    response = await this._makeOllamaRequest(text, toolCalls);
+                case 'ollama':
+                    response = await this._makeOllamaRequest(text, toolCalls, relevantToolsPrompt);
                     break;
-            default:
-                throw new Error(`Unknown provider: ${provider}`);
-        }
+                default:
+                    throw new Error(`Unknown provider: ${provider}`);
+            }
+            
+            // If we have relevant memories, store this interaction as a new memory
+            if (relevantMemories.length > 0 && memoryService && memoryService._initialized) {
+                try {
+                    await memoryService.indexMemory({
+                        text: userQuery,
+                        context: {
+                            response: response,
+                            relevant_memories: relevantMemories.map(m => m.id),
+                            timestamp: new Date().toISOString(),
+                            type: 'conversation',
+                            importance: this._determineMemoryImportance(userQuery, response),
+                            tags: this._extractTags(userQuery, response)
+                        }
+                    });
+                } catch (e) {
+                    log(`Error storing new memory: ${e.message}`);
+                }
+            }
             
             return response;
-    } catch (error) {
+        } catch (error) {
             log(`Error in makeRequest: ${error.message}`);
             throw error;
         }
+    }
+
+    _formatMemoryContext(memories) {
+        return memories.map(memory => {
+            let context = `Memory: ${memory.text}\n`;
+            
+            // Add relevance score if available
+            if (memory.relevance) {
+                context += `Relevance: ${Math.round(memory.relevance * 100)}%\n`;
+            }
+            
+            // Add timestamp if available
+            if (memory.context?.timestamp) {
+                const date = new Date(memory.context.timestamp);
+                context += `Time: ${date.toLocaleString()}\n`;
+            }
+            
+            // Add importance if available
+            if (memory.context?.metadata?.importance) {
+                context += `Importance: ${memory.context.metadata.importance}\n`;
+            }
+            
+            // Add tags if available
+            if (memory.context?.metadata?.tags?.length > 0) {
+                context += `Tags: ${memory.context.metadata.tags.join(', ')}\n`;
+            }
+            
+            return context;
+        }).join('\n');
+    }
+
+    _determineMemoryImportance(query, response) {
+        // Determine memory importance based on content
+        const importantKeywords = [
+            'important', 'critical', 'urgent', 'essential',
+            'remember', 'note', 'key', 'significant'
+        ];
+        
+        const text = `${query} ${response}`.toLowerCase();
+        
+        // Check for important keywords
+        if (importantKeywords.some(keyword => text.includes(keyword))) {
+            return 'high';
+        }
+        
+        // Check for personal information
+        if (text.includes('name') || text.includes('password') || text.includes('email')) {
+            return 'high';
+        }
+        
+        // Check for preferences
+        if (text.includes('prefer') || text.includes('like') || text.includes('favorite')) {
+            return 'normal';
+        }
+        
+        return 'normal';
+    }
+
+    _extractTags(query, response) {
+        const tags = new Set();
+        
+        // Extract potential tags from the text
+        const text = `${query} ${response}`.toLowerCase();
+        
+        // Common categories for tagging
+        const categories = {
+            'system': ['system', 'computer', 'desktop', 'settings'],
+            'personal': ['name', 'preference', 'like', 'favorite'],
+            'task': ['task', 'todo', 'reminder', 'schedule'],
+            'technical': ['error', 'bug', 'fix', 'solution']
+        };
+        
+        // Check each category
+        Object.entries(categories).forEach(([category, keywords]) => {
+            if (keywords.some(keyword => text.includes(keyword))) {
+                tags.add(category);
+            }
+        });
+        
+        return Array.from(tags);
     }
 
     // Shared tool processing methods
@@ -199,8 +396,8 @@ class ProviderAdapter {
         return { text, toolCalls };
     }
 
-    // Update LlamaCPP request method to use shared processing
-    _makeLlamaRequest(text, toolCalls) {
+    // Update LlamaCPP request method to use shared processing and include relevant tools
+    _makeLlamaRequest(text, toolCalls, relevantToolsPrompt) {
         const serverUrl = this._settings.get_string('llama-server-url');
         if (!serverUrl) {
             throw new Error('Llama server URL is not set');
@@ -209,10 +406,11 @@ class ProviderAdapter {
         const modelName = this._settings.get_string('llama-model-name') || 'llama';
         const temperature = this._settings.get_double('llama-temperature');
 
-        // Create the system message with tool instructions
+        // Create the system message with tool instructions and relevant tools
+        const systemPrompt = this._getToolSystemPrompt(relevantToolsPrompt);
         const systemMessage = {
             role: 'system',
-            content: this._getToolSystemPrompt()
+            content: systemPrompt
         };
 
         // Create the user message
@@ -221,36 +419,31 @@ class ProviderAdapter {
             content: text
         };
 
-        // Prepare the request data
-        const requestData = {
+        // Create the request payload
+        const payload = {
             model: modelName,
             messages: [systemMessage, userMessage],
-            max_tokens: Math.round(this._settings.get_int('max-response-length') / 4),
+            max_tokens: 1338,
             temperature: temperature,
-            stream: false
+            stream: false,
+            functions: toolCalls || [],  // Use the filtered tools
+            function_call: 'auto'
         };
 
-        // Add tools if tool calling is enabled
-        if (toolCalls) {
-            const tools = toolLoader.getToolsAsSchemaArray();
-            requestData.functions = tools;
-            requestData.function_call = 'auto';
-        }
-
-        log(`Making Llama request with data: ${JSON.stringify(requestData)}`);
+        log(`Making Llama request with data: ${JSON.stringify(payload)}`);
 
         const message = Soup.Message.new('POST', `${serverUrl}/v1/chat/completions`);
         message.request_headers.append('Content-Type', 'application/json');
-        message.set_request_body_from_bytes('application/json', new GLib.Bytes(JSON.stringify(requestData)));
+        message.set_request_body_from_bytes('application/json', new GLib.Bytes(JSON.stringify(payload)));
 
         return new Promise((resolve, reject) => {
             _httpSession.queue_message(message, (session, msg) => {
-                    if (msg.status_code !== 200) {
+                if (msg.status_code !== 200) {
                     const errorMsg = `Llama API error: ${msg.status_code} - ${msg.reason_phrase}`;
                     log(errorMsg);
                     reject(errorMsg);
-                        return;
-                    }
+                    return;
+                }
 
                 try {
                     const response = JSON.parse(msg.response_body.data);
@@ -259,7 +452,7 @@ class ProviderAdapter {
                     // Use shared processing method
                     const processed = this._processToolResponse(response);
                     resolve(processed);
-                        } catch (error) {
+                } catch (error) {
                     log(`Error processing Llama response: ${error.message}`);
                     reject(`Error processing Llama response: ${error.message}`);
                 }
@@ -267,8 +460,8 @@ class ProviderAdapter {
         });
     }
 
-    // Provider-specific request implementations
-    _makeOpenAIRequest(text, toolCalls) {
+    // Provider-specific request implementations with relevant tools support
+    _makeOpenAIRequest(text, toolCalls, relevantToolsPrompt) {
         const apiKey = this._settings.get_string('openai-api-key');
         if (!apiKey) {
             throw new Error('OpenAI API key is not set');
@@ -277,15 +470,23 @@ class ProviderAdapter {
         const model = this._settings.get_string('openai-model');
         const temperature = this._settings.get_double('openai-temperature');
 
+        // Add relevant tools to the system prompt
+        const systemPrompt = this._getToolSystemPrompt(relevantToolsPrompt);
+        
+        const messages = [
+            { role: 'system', content: systemPrompt },
+            { role: 'user', content: text }
+        ];
+
         const requestData = {
             model: model,
-            messages: [{ role: 'user', content: text }],
+            messages: messages,
             max_tokens: Math.round(this._settings.get_int('max-response-length') / 4),
             temperature: temperature
         };
 
-        if (toolCalls) {
-            requestData.tools = toolLoader.getToolsAsSchemaArray();
+        if (toolCalls && toolCalls.length > 0) {
+            requestData.tools = toolCalls;  // Use the filtered tools
             requestData.tool_choice = "auto";
         }
 
@@ -313,15 +514,28 @@ class ProviderAdapter {
         });
     }
 
-    _makeGeminiRequest(text, toolCalls) {
+    _makeGeminiRequest(text, toolCalls, relevantToolsPrompt) {
         const apiKey = this._settings.get_string('gemini-api-key');
         if (!apiKey) {
             throw new Error('Gemini API key is not set');
         }
 
+        // Add relevant tools to the system prompt
+        const systemPrompt = this._getToolSystemPrompt(relevantToolsPrompt);
+        
+        // Format the prompt to include tool descriptions
+        const toolDescriptions = toolCalls ? toolCalls.map(tool => 
+            `${tool.name}: ${tool.description}\nRequired parameters: ${Object.entries(tool.parameters)
+                .filter(([_, param]) => param.required)
+                .map(([name, param]) => `${name}: ${param.description}`)
+                .join(', ')}`
+        ).join('\n\n') : '';
+        
+        const fullPrompt = `${systemPrompt}\n\n${toolDescriptions}\n\nUser query: ${text}`;
+        
         const requestData = {
             contents: [{
-                parts: [{ text: text }]
+                parts: [{ text: fullPrompt }]
             }]
         };
 
@@ -348,7 +562,7 @@ class ProviderAdapter {
         });
     }
 
-    _makeAnthropicRequest(text, toolCalls) {
+    _makeAnthropicRequest(text, toolCalls, relevantToolsPrompt) {
         const apiKey = this._settings.get_string('anthropic-api-key');
         if (!apiKey) {
             throw new Error('Anthropic API key is not set');
@@ -358,9 +572,22 @@ class ProviderAdapter {
         const temperature = this._settings.get_double('anthropic-temperature');
         const maxTokens = this._settings.get_int('anthropic-max-tokens');
 
+        // Add relevant tools to the system prompt
+        const systemPrompt = this._getToolSystemPrompt(relevantToolsPrompt);
+        
+        // Format the prompt to include tool descriptions
+        const toolDescriptions = toolCalls ? toolCalls.map(tool => 
+            `${tool.name}: ${tool.description}\nRequired parameters: ${Object.entries(tool.parameters)
+                .filter(([_, param]) => param.required)
+                .map(([name, param]) => `${name}: ${param.description}`)
+                .join(', ')}`
+        ).join('\n\n') : '';
+        
+        const anthropicPrompt = `${systemPrompt}\n\n${toolDescriptions}\n\nHuman: ${text}\n\nAssistant:`;
+
         const requestData = {
             model: model,
-            prompt: `\n\nHuman: ${text}\n\nAssistant:`,
+            prompt: anthropicPrompt,
             max_tokens_to_sample: maxTokens,
             temperature: temperature
         };
@@ -390,7 +617,7 @@ class ProviderAdapter {
         });
     }
 
-    _makeOllamaRequest(text, toolCalls) {
+    _makeOllamaRequest(text, toolCalls, relevantToolsPrompt) {
         const serverUrl = this._settings.get_string('ollama-server-url');
         if (!serverUrl) {
             throw new Error('Ollama server URL is not set');
@@ -401,24 +628,24 @@ class ProviderAdapter {
 
         // For Ollama, we need to use their chat API which has better support for tools
         let requestUrl = `${serverUrl}/api/generate`;
+        
+        // Get the system prompt with relevant tools
+        const toolSystemPrompt = this._getToolSystemPrompt(relevantToolsPrompt);
+        
+        // Build the full prompt
+        const fullPrompt = `${toolSystemPrompt}\n\nUser: ${text}`;
+        
         let requestData = {
             model: modelName,
-            prompt: text,
+            prompt: fullPrompt,
             stream: false,
             options: {
                 temperature: temperature
             }
         };
 
-        // If tool calls are enabled, use the chat API format instead
-        if (toolCalls) {
-            // Add system message with tool instructions at the beginning of the prompt
-            const toolSystemPrompt = this._getToolSystemPrompt();
-            requestData.prompt = `${toolSystemPrompt}\n\nUser: ${text}`;
-            
-            log(`Making Ollama request with tool support. Model: ${modelName}, temp: ${temperature}`);
-        }
-
+        log(`Making Ollama request with tool support. Model: ${modelName}, temp: ${temperature}`);
+        
         log(`Sending request to Ollama: ${requestUrl}`);
         const message = Soup.Message.new('POST', requestUrl);
         message.request_headers.append('Content-Type', 'application/json');
@@ -448,18 +675,16 @@ class ProviderAdapter {
         });
     }
 
-    _getToolSystemPrompt() {
-        // Get the formatted tool descriptions from all loaded tools
-        const toolsArray = toolLoader.getTools();
-        const toolDescriptions = toolsArray.map(tool => {
-            return `Tool: ${tool.name}
-Description: ${tool.description}
-Category: ${tool.category}
-Parameters: ${JSON.stringify(tool.parameters, null, 2)}`;
-        }).join('\n\n');
-
-        // Use the SystemPrompt class to get the formatted prompt
-        return SystemPrompt.getPrompt(toolDescriptions);
+    _getToolSystemPrompt(relevantToolsPrompt = '') {
+        // Always use the RAG system's prompt
+        if (relevantToolsPrompt) {
+            log('Using relevant tool descriptions from RAG system');
+            return relevantToolsPrompt;
+        }
+        
+        // If no relevant tools found, return a minimal prompt
+        log('No relevant tools found, using minimal prompt');
+        return 'You are a helpful assistant. No specific tools are available for this query. Please respond conversationally.';
     }
 }
 
@@ -2013,6 +2238,16 @@ class Extension {
     }
 
     disable() {
+        // Clean up memory service
+        if (memoryService) {
+            try {
+                memoryService.destroy();
+                log('Memory service destroyed');
+            } catch (e) {
+                log(`Error cleaning up memory service: ${e.message}`);
+            }
+        }
+        
         if (this._button) {
             // Clear the session before disabling
             if (this._button._chatBox) {

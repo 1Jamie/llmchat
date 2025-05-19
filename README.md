@@ -2,286 +2,317 @@
 
 A seamless integration of AI into your GNOME desktop environment. Chat naturally with AI assistants that understand your system, can help manage windows and workspaces, and execute desktop tasks - all through a native interface. Making your desktop experience smarter and more efficient.
 
-The only ones verifiable working ~well ish is the ollama provider and llamacpp. Both verified working with tool calls. others were half crap built based on the docs and has never been tested... dont expect them to work without a fight.
+> **Note**: Currently, only the Ollama provider and LlamaCPP are verified working with tool calls. Other providers were built based on documentation and may require additional configuration.
 
+## Table of Contents
+- [Features](#features)
+- [Architecture](#architecture)
+  - [Process Flow](#process-flow)
+  - [Memory System](#memory-system)
+  - [Tool System](#tool-system)
+- [Python Embedding Service](#python-embedding-service)
+- [Installation](#installation)
+- [Configuration](#configuration)
+- [Usage](#usage)
+- [Development](#development)
+- [Troubleshooting](#troubleshooting)
+- [Testing](#testing)
 
 ## Features
 
-- **Multiple AI Models**: Supports various AI services:
+### Core Capabilities
+- **Multiple AI Models**: Support for various AI services:
   - Llama (local via API)
   - Ollama (local)
 
+- **Memory System**: Persistent memory storage and retrieval:
+  - Stores conversations and context
+  - Semantic search for relevant memories
+  - Automatic memory indexing
+  - Context-aware responses
 
-- **System Information Tools**: Access system information through AI tool calls including:
-  - Current workspace and window information
-  - System resource usage
-  - Hardware details
-  - Running applications
-  - Selected text and clipboard content
+- **System Integration**: Comprehensive system interaction:
+  - Window and workspace management
+  - Application control
+  - System settings access
+  - Resource monitoring
+  - Clipboard integration
 
-- **Shell Integration**: Let the AI control your desktop with built-in tools:
-  - Switch workspaces
-  - Manage windows (minimize, maximize, arrange in grid)
-  - Launch applications
-  - Toggle system settings like night light
-
-- **Tool Calling**: Support for AI models with tool calling capabilities, allowing the model to:
-  - Execute shell operations via structured API
-  - Get current time and date
-  - Search the web for information
-  - Fetch content from URLs
-  - And much more!
-
-- **User-Friendly Interface**:
+- **User Interface**:
   - Multi-line text input
   - Smooth scrolling chat history
-  - Settings panel for configuration
-  - Session history management
-  - Chat persistence between sessions
+  - Settings panel
+  - Session management
+  - Chat persistence
 
-## Session Management
+## Architecture
 
-The extension now includes comprehensive session management features:
+### Process Flow
 
-- **Session History**: Access your previous chat sessions through the history panel
-- **Session Information**: View detailed information about each session:
-  - Message count
-  - Session duration
-  - Model and provider details
-  - First and last message previews
-- **Session Controls**:
-  - Resume previous conversations
-  - Start new chat sessions
-  - Delete old sessions
-  - Automatic session saving
-- **Session Persistence**: Chats are automatically saved and persist between extension restarts
-- **Session Metadata**: Each session includes:
-  - Creation and update timestamps
-  - AI model and provider settings
-  - Conversation previews
-  - Message statistics
+The extension follows a structured process flow when handling user interactions:
 
-To access your chat history:
-1. Click the history icon in the chat interface
-2. Browse through your saved sessions
-3. Click "Resume" to continue a previous conversation
-4. Use "New Chat" to start a fresh session
+1. **User Input Processing**
+   - Message entry in chat interface
+   - ProviderAdapter preparation
+   - Message formatting
+
+2. **Context Gathering**
+   - Memory retrieval via semantic search
+   - Tool description loading
+   - System context collection
+   - Prompt composition
+
+3. **AI Model Interaction**
+   - Provider communication (Ollama/Llama)
+   - Response generation
+   - Tool call detection
+
+4. **Tool Execution**
+   - Sequential tool processing
+   - User confirmation handling
+   - Result collection
+   - Context integration
+
+5. **Response Generation**
+   - Tool result incorporation
+   - Response formatting
+   - Markdown processing
+
+6. **Memory Storage**
+   - Conversation indexing
+   - Vector database storage
+   - Context persistence
+
+7. **UI Update**
+   - Response display
+   - History management
+   - Session saving
+   - Interface refresh
+
+8. **Error Handling**
+   - Network retry logic
+   - Tool validation
+   - Error messaging
+   - Debug logging
+
+### Memory System
+
+The extension includes a robust memory system for persistent storage and retrieval:
+
+#### Features
+- Semantic memory storage
+- Automatic indexing
+- Context-aware responses
+- Memory search capabilities
+
+#### Implementation
+- Local embedding server for vector storage
+- `embeddings/memories` directory structure
+- Automatic persistence management
+- Tool system integration
+
+#### Directory Structure
+```
+embeddings/
+├── memories/    # Conversation memories and context
+└── tools/       # Tool descriptions and embeddings
+logs/            # Server and extension logs
+```
+
+> **Note**: The `embeddings/` and `logs/` directories are gitignored to prevent committing sensitive data.
+
+### Tool System
+
+The extension uses a modular tool system for system interaction:
+
+#### Core Tools
+1. **SystemContextTool**
+   - System information
+   - Window details
+   - Resource usage
+   - Clipboard content
+
+2. **WindowManagementTool**
+   - Window control
+   - Layout management
+   - Position/size adjustment
+
+3. **WorkspaceManagementTool**
+   - Workspace switching
+   - Creation/removal
+   - Window movement
+
+4. **WebSearchTool**
+   - Brave Search integration
+   - Web content fetching
+   - Result formatting
+
+5. **ApplicationManagementTool**
+   - App launching
+   - Process control
+   - Installation status
+
+6. **SystemSettingsTool**
+   - Display control
+   - Volume management
+   - Theme settings
+
+#### Tool Safety
+- Confirmation system for dangerous actions
+- Parameter validation
+- Error handling
+- User feedback
+
+## Python Embedding Service
+
+The extension includes a Python-based embedding service that provides semantic search capabilities for the memory system.
+
+### Service Overview
+- Runs as a local Flask server on port 5000
+- Uses the `sentence-transformers` library with the `all-MiniLM-L6-v2` model
+- Provides REST API endpoints for memory management
+- Handles persistent storage of embeddings and documents
+
+### API Endpoints
+1. **GET /status**
+   - Returns service status and configuration
+   - Shows loaded namespaces and document counts
+   - Reports model and system information
+
+2. **POST /index**
+   - Indexes new documents for semantic search
+   - Stores embeddings and documents in specified namespace
+   - Persists data to disk automatically
+
+3. **POST /search**
+   - Performs semantic search across namespaces
+   - Returns top-k most relevant results
+   - Uses cosine similarity with configurable threshold
+
+4. **POST /clear**
+   - Clears specified namespace
+   - Removes embeddings and documents
+   - Updates persistent storage
+
+### Storage Structure
+```
+~/.local/share/gnome-shell/extensions/llmchat@charja113.gmail.com/
+├── embeddings/
+│   ├── memories/           # User conversation memories
+│   │   ├── embeddings.pkl  # Vector embeddings
+│   │   └── documents.json  # Memory documents
+│   └── tools/             # Tool descriptions
+└── logs/                  # Service logs
+```
+
+### Integration
+- Started automatically with the extension
+- Handles memory persistence between sessions
+- Provides semantic search for context retrieval
+- Manages tool descriptions for AI understanding
+
+### Requirements
+- Python 3.x
+- sentence-transformers
+- Flask
+- PyTorch
 
 ## Installation
 
-### From source
-
-1. Clone this repository:
+### From Source
+1. Clone the repository:
    ```bash
-    git clone https://github.com/1Jamie/llmchat.git
+   git clone https://github.com/1Jamie/llmchat.git
    ```
 
-2. Copy or link the extension to your GNOME Shell extensions directory:
+2. Install to extensions directory:
    ```bash
    cp -r llmchat ~/.local/share/gnome-shell/extensions/llmchat@charja113.gmail.com
    ```
 
 3. Restart GNOME Shell:
-   - Press `Alt+F2`, type `r`, and press `Enter` (X11)
-   - Log out and log back in (Wayland)
+   - X11: `Alt+F2`, type `r`, press `Enter`
+   - Wayland: Log out and back in
 
-4. Enable the extension using GNOME Extensions app or:
+4. Enable the extension:
    ```bash
    gnome-extensions enable llmchat@charja113.gmail.com
    ```
 
 ## Configuration
 
-Click the settings icon in the extension menu or use GNOME Extensions app to configure:
+### Provider Setup
+1. Select AI Provider (Ollama/Llama)
+2. Configure API keys
+3. Set server URLs
+4. Adjust model parameters
 
-1. **Select AI Provider**: Choose from Llamacpp, or Ollama
-2. **API Keys**: Enter your API keys for cloud-based services
-   - Brave Search API key (required for web search functionality)
-3. **Server URLs**: Configure local model server addresses
-4. **Model Settings**: Select models and adjust parameters like temperature
-5. **Response Options**: Set max response length and thinking message visibility
-
-### Getting a Brave Search API Key
-
-To use the web search functionality:
-
+### Brave Search Setup
 1. Visit [Brave Search API](https://brave.com/search/api/)
-2. Sign up for an API key
-3. Enter your API key in the extension settings
-4. Restart the extension to apply changes
+2. Obtain API key
+3. Configure in settings
+4. Restart extension
 
 ## Usage
 
-1. Click the LLM Chat icon in the top panel to open the chat interface
-2. Type your message and press Enter or click Send
-3. Tools are automatically enabled to allow the AI to interact with your system
-
-## Tool System
-
-The extension uses a modular tool system that allows the AI to interact with your system through structured function calls.
-
-### How Tools Work
-
-Tools are implemented as separate JavaScript modules in the `tools/` directory. Each tool extends a base class and provides specific functionality like system information, window management, or web search.
-
-The extension loads tools dynamically using the `ToolLoader` system, making it easy to add new capabilities without modifying the core extension code.
-
-### Available Tools
-
-The extension currently includes these tools:
-
-#### SystemContextTool
-- **Name:** `system_context`
-- **Description:** Get system context information including windows, workspaces, system info, and clipboard content
-- **Functions:** Get active window title, workspace information, system specifications, RAM usage, CPU info, running applications, clipboard content, and selected text
-- **Example Use:** "What applications are running on my system right now?"
-
-#### WindowManagementTool
-- **Name:** `window_management`
-- **Description:** Manage windows including minimizing, maximizing, arranging, moving, resizing and closing
-- **Functions:** Minimize all windows, maximize current window, arrange windows in grid, move/resize windows
-- **Example Use:** "Maximize my current window" or "Arrange my windows in a 2x2 grid"
-
-#### WorkspaceManagementTool
-- **Name:** `workspace_management`
-- **Description:** Manage workspaces including switching, creating, and removing
-- **Functions:** Switch to workspace, create new workspace, remove workspace, list workspaces
-- **Example Use:** "Switch to workspace 2" or "Create a new workspace"
-
-#### TimeDateTool
-- **Name:** `time_date`
-- **Description:** Get time and date information from the system
-- **Functions:** Current time, date, timezone, calendar information
-- **Example Use:** "What time is it?" or "What's today's date?"
-
-#### WebSearchTool
-- **Name:** `web_search`
-- **Description:** Search the web for information using Brave Search API
-- **Functions:** Perform web searches and return results with enhanced relevance and privacy
-- **Example Use:** "Search the web for the latest news about GNOME Shell"
-- **Requirements:** Brave Search API key (configure in settings)
-
-#### FetchContentTool
-- **Name:** `fetch_web_content`
-- **Description:** Fetch and extract content from webpages with intelligent content extraction
-- **Functions:** 
-  - Fetch content from multiple URLs simultaneously
-  - Extract main content with context awareness
-  - Clean and format content for readability
-  - Extract metadata (title, author, date)
-  - Special handling for recipes and articles
-- **Features:**
-  - Smart content extraction algorithms
-  - Context-aware content processing
-  - Automatic content cleaning and formatting
-  - Metadata extraction
-  - Recipe-specific content handling
-- **Example Use:** "Get the recipe from this cooking website" or "Extract the main article content from this news site"
-- **Parameters:**
-  - `urls`: Array of URLs to fetch content from
-  - `context`: Optional context including original query and focus keywords
-
-#### ApplicationManagementTool 
-- **Name:** `application_management`
-- **Description:** Launch and manage applications
-- **Functions:** Launch apps, list installed apps, get running apps
-- **Example Use:** "Launch Firefox" or "What applications do I have installed?"
-
-#### DisplayManagementTool
-- **Name:** `display_management`
-- **Description:** Control display settings
-- **Functions:** Set brightness, change display settings
-- **Example Use:** "Set my screen brightness to 80%"
-
-#### SystemSettingsTool
-- **Name:** `system_settings` 
-- **Description:** Access and modify system settings
-- **Functions:** Toggle night light, modify system settings
-- **Example Use:** "Turn on night light" or "Turn down the volume"
-
-#### FileOperationsTool
-- **Name:** `file_operations`
-- **Description:** Perform file and directory operations using safe console commands. Supports listing, reading, writing, copying, moving, deleting, searching, and more. Includes confirmation for dangerous actions.
-- **Example Use:** "Delete the file src/test.txt" or "List all files in the Documents folder"
-
-### Tool Confirmation for Dangerous Actions
-
-Some tools (such as file operations) may perform dangerous or destructive actions (like deleting files, overwriting data, or changing system settings). To protect users, the extension implements a confirmation system:
-
-- Tools that support dangerous actions include a `confirm` parameter in their schema.
-- When a dangerous action is requested (e.g., `delete`), the tool will return a response like:
-  ```js
-  return {
-      confirmation_required: true,
-      summary: '⚠️ Confirmation required for dangerous action.\nAction: delete\nTarget: ...',
-      params: { ...params, confirm: true }
-  };
-  ```
-- The chat UI will display an inline confirmation prompt. Only after you confirm will the tool be executed.
-- On success or error, the tool will return a user-friendly `message` property, which is shown in the chat.
-
-#### Example (for tool authors):
-```js
-if (action === 'delete' && !confirm) {
-    return {
-        confirmation_required: true,
-        summary: `⚠️ Confirmation required for dangerous action.\nAction: delete\nTarget: ${text_input}`,
-        params: { ...params, confirm: true }
-    };
-}
-```
-
-#### For Users
-- When you request a dangerous action, you will see a confirmation dialog in the chat.
-- The action will only proceed after you confirm.
-- This helps prevent accidental or unintended destructive operations.
-
-See the tools/README.md for more details on implementing confirmation in custom tools.
-
-### Creating Custom Tools
-
-You can create your own tools to extend the capability of the extension. The process is as follows:
-
-1. Copy `tools/ToolTemplate.js` to a new file in the `tools/` directory
-2. Modify the tool class with your implementation
-3. Restart the extension to load your custom tool
-
-Each tool follows a standard format that includes:
-- Unique name and category
-- Parameter definitions with types and descriptions
-- An execute method that implements the tool's functionality
-- Structured return values
-
-See the `tools/README.md` file for detailed information on creating custom tools.
+1. Open chat interface via panel icon
+2. Type message and send
+3. Interact with AI assistant
+4. Use tools as needed
 
 ## Development
 
-### Running in nested GNOME Shell
-
-For development, you can test the extension in a nested GNOME Shell:
-
+### Environment Setup
 ```bash
-# Set larger window size using environmental variables
+# Nested GNOME Shell
 gnome-shell --nested --wayland --replace
-```
 
-### Building the extension
-
-Compile the settings schema:
-
-```bash
-cd ~/.local/share/gnome-shell/extensions/llmchat@charja113.gmail.com/schemas
+# Schema compilation
+cd schemas
 glib-compile-schemas .
 ```
 
+### Custom Tool Development
+1. Use `ToolTemplate.js`
+2. Implement required methods
+3. Add to tools directory
+4. Restart extension
+
 ## Troubleshooting
 
-- **Extension crashes on enable/disable**: Fixed various cleanup issues in recent updates
-- **API calls fail**: Check your API keys and internet connection
-- **Missing UI elements**: Ensure you have the latest GNOME Shell version
-- **Thinking messages not displayed**: Toggle the "Hide Thinking Messages" setting
+### Common Issues
+- Extension crashes: Check cleanup procedures
+- API failures: Verify keys and connectivity
+- UI problems: Update GNOME Shell
+- Message display: Check settings
 
+## Testing
 
+### Core Functionality
+```bash
+# Session Management
+start a new chat
+view chat history
+resume previous chat
+
+# System Interaction
+get system info
+manage windows
+control workspaces
+
+# Web Features
+search the web
+fetch content
+process results
+```
+
+### Error Scenarios
+```bash
+# Test error handling
+invalid searches
+failed tool calls
+network issues
+```
 
 ## Credits
 

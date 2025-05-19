@@ -3,7 +3,7 @@
 const { GObject, Gio, Soup, GLib } = imports.gi;
 const ExtensionUtils = imports.misc.extensionUtils;
 const Me = ExtensionUtils.getCurrentExtension();
-const { BaseTool } = Me.imports.tools.BaseTool;
+const { BaseTool } = Me.imports.utils.BaseTool;
 
 // Initialize session for API requests
 const _httpSession = new Soup.Session();
