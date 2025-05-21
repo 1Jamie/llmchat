@@ -1,4 +1,4 @@
-# LLM Chat - GNOME Shell Extension
+# LLM Chat GNOME Shell Extension
 
 A seamless integration of AI into your GNOME desktop environment. Chat naturally with AI assistants that understand your system, can help manage windows and workspaces, and execute desktop tasks - all through a native interface. Making your desktop experience smarter and more efficient.
 
@@ -10,7 +10,7 @@ A seamless integration of AI into your GNOME desktop environment. Chat naturally
   - [Process Flow](#process-flow)
   - [Memory System](#memory-system)
   - [Tool System](#tool-system)
-- [Python Embedding Service](#python-embedding-service)
+- [Python Qdrant Service](#python-qdrant-service)
 - [Installation](#installation)
 - [Configuration](#configuration)
 - [Usage](#usage)
@@ -100,26 +100,25 @@ The extension follows a structured process flow when handling user interactions:
 The extension includes a robust memory system for persistent storage and retrieval:
 
 #### Features
-- Semantic memory storage
-- Automatic indexing
+- Semantic memory storage using Qdrant vector database
+- Automatic indexing and retrieval
 - Context-aware responses
 - Memory search capabilities
+- Efficient vector similarity search
 
 #### Implementation
-- Local embedding server for vector storage
-- `embeddings/memories` directory structure
+- Local Qdrant server for vector storage
+- Sentence transformers for embeddings
 - Automatic persistence management
 - Tool system integration
 
 #### Directory Structure
 ```
-embeddings/
-├── memories/    # Conversation memories and context
-└── tools/       # Tool descriptions and embeddings
+qdrant/          # Qdrant vector database storage
 logs/            # Server and extension logs
 ```
 
-> **Note**: The `embeddings/` and `logs/` directories are gitignored to prevent committing sensitive data.
+> **Note**: The `qdrant/` and `logs/` directories are gitignored to prevent committing sensitive data.
 
 ### Tool System
 
@@ -163,272 +162,144 @@ The extension uses a modular tool system for system interaction:
 - Error handling
 - User feedback
 
-## Python Embedding Service
+## Python Qdrant Service
 
-The extension includes a Python-based embedding service that provides semantic search capabilities for the memory system.
+The extension includes a Python-based Qdrant service that provides vector storage and semantic search capabilities for the memory system.
 
 ### Service Overview
 - Runs as a local Flask server on port 5000
+- Uses Qdrant for efficient vector storage and retrieval
 - Uses the `sentence-transformers` library with the `all-MiniLM-L6-v2` model
 - Provides REST API endpoints for memory management
-- Handles persistent storage of embeddings and documents
+- Handles persistent storage of vectors and metadata
 
 ### API Endpoints
-1. **GET /status**
-   - Returns service status and configuration
-   - Shows loaded namespaces and document counts
-   - Reports model and system information
+1. **GET /health**
+   - Returns service health status
+   - Shows model loading status
+   - Reports system information
 
 2. **POST /index**
-   - Indexes new documents for semantic search
-   - Stores embeddings and documents in specified namespace
+   - Indexes new documents in Qdrant collections
+   - Stores vectors and metadata in specified namespace
    - Persists data to disk automatically
 
 3. **POST /search**
-   - Performs semantic search across namespaces
+   - Performs semantic search across collections
    - Returns top-k most relevant results
    - Uses cosine similarity with configurable threshold
-
-4. **POST /clear**
-   - Clears specified namespace
-   - Removes embeddings and documents
-   - Updates persistent storage
 
 ### Storage Structure
 ```
 ~/.local/share/gnome-shell/extensions/llmchat@charja113.gmail.com/
-├── embeddings/
-│   ├── memories/           # User conversation memories
-│   │   ├── embeddings.pkl  # Vector embeddings
-│   │   └── documents.json  # Memory documents
-│   └── tools/             # Tool descriptions
-└── logs/                  # Service logs
+├── qdrant/              # Qdrant vector database
+│   ├── collections/     # Vector collections
+│   │   ├── memories    # User conversation memories
+│   │   └── tools       # Tool descriptions
+│   └── snapshots/      # Database snapshots
 ```
-
-### Integration
-- Started automatically with the extension
-- Handles memory persistence between sessions
-- Provides semantic search for context retrieval
-- Manages tool descriptions for AI understanding
-
-### Requirements
-- Python 3.x
-- sentence-transformers
-- Flask
-- PyTorch
 
 ## Installation
 
-### From Source
-1. Clone the repository:
+1. Install the extension:
    ```bash
-   git clone https://github.com/1Jamie/llmchat.git
+   git clone https://github.com/yourusername/llmchat.git
+   cd llmchat
+   make install
    ```
 
-2. Install to extensions directory:
+2. Install Python dependencies:
    ```bash
-   cp -r llmchat ~/.local/share/gnome-shell/extensions/llmchat@charja113.gmail.com
+   pip install --user sentence-transformers flask qdrant-client
    ```
 
 3. Restart GNOME Shell:
-   - X11: `Alt+F2`, type `r`, press `Enter`
-   - Wayland: Log out and back in
-
-4. Enable the extension:
-   ```bash
-   gnome-extensions enable llmchat@charja113.gmail.com
-   ```
+   - Press Alt+F2
+   - Type 'r' and press Enter
 
 ## Configuration
 
-### Provider Setup
-1. Select AI Provider (Ollama/Llama)
-2. Configure API keys
-3. Set server URLs
-4. Adjust model parameters
+The extension can be configured through the GNOME Extensions app:
 
-### Brave Search Setup
-1. Visit [Brave Search API](https://brave.com/search/api/)
-2. Obtain API key
-3. Configure in settings
-4. Restart extension
+1. Open GNOME Extensions
+2. Find "LLM Chat"
+3. Click the settings icon
+4. Configure:
+   - AI Provider settings
+   - Model selection
+   - Temperature
+   - Memory settings
+   - Tool preferences
 
 ## Usage
 
-1. Open chat interface via panel icon
-2. Type message and send
-3. Interact with AI assistant
-4. Use tools as needed
+1. Click the LLM Chat icon in the top panel
+2. Type your message in the input box
+3. Press Enter or click Send
+4. The AI will respond and can:
+   - Execute system commands
+   - Manage windows
+   - Search the web
+   - Control applications
+   - Remember context
 
 ## Development
 
-### Environment Setup
-```bash
-# Nested GNOME Shell
-gnome-shell --nested --wayland --replace
+### Prerequisites
+- GNOME Shell development environment
+- Python 3.6+
+- Node.js and npm
+- Make
 
-# Schema compilation
-cd schemas
-glib-compile-schemas .
+### Building
+```bash
+make build
 ```
 
-### Custom Tool Development
-1. Use `ToolTemplate.js`
-2. Implement required methods
-3. Add to tools directory
-4. Restart extension
+### Testing
+```bash
+make test
+```
 
 ## Troubleshooting
 
 ### Common Issues
-- Extension crashes: Check cleanup procedures
-- API failures: Verify keys and connectivity
-- UI problems: Update GNOME Shell
-- Message display: Check settings
+
+1. **Python Server Not Starting**
+   - Check Python installation
+   - Verify dependencies are installed
+   - Check logs in `~/.local/share/gnome-shell/extensions/llmchat@charja113.gmail.com/logs/`
+
+2. **Memory System Issues**
+   - Verify Qdrant server is running
+   - Check collection permissions
+   - Clear and reindex if needed
+
+3. **Tool Execution Failures**
+   - Check tool permissions
+   - Verify system requirements
+   - Review error logs
+
+### Logs
+
+Logs are stored in:
+```
+~/.local/share/gnome-shell/extensions/llmchat@charja113.gmail.com/logs/
+```
 
 ## Testing
 
-### Core Functionality
+The extension includes automated tests:
+
 ```bash
-# Session Management
-start a new chat
-view chat history
-resume previous chat
+# Run all tests
+make test
 
-# System Interaction
-get system info
-manage windows
-control workspaces
-
-# Web Features
-search the web
-fetch content
-process results
+# Run specific test suite
+make test-unit
+make test-integration
 ```
 
-### Error Scenarios
-```bash
-# Test error handling
-invalid searches
-failed tool calls
-network issues
-```
+## License
 
-## Credits
-
-Developed by 1jamie
-
-## Testing the Extension
-
-Here's a comprehensive list of commands to test the functionality of the extension:
-
-### Session Management
-```
-start a new chat
-view chat history
-resume previous chat
-delete a chat session
-check session information
-```
-
-### Web Search and Content
-```
-search for latest GNOME news
-search for a specific recipe
-fetch content from a news article
-get recipe instructions from a cooking website
-search for technical documentation
-```
-
-### Display Management
-```
-get display information
-get primary display
-set brightness to 50%
-toggle night light
-```
-
-### Window Management
-```
-minimize all windows
-maximize all windows
-maximize current window
-arrange windows in grid
-move window to x=100 y=100
-resize window to width=800 height=600
-close current window
-```
-
-### System Settings
-```
-get brightness
-set brightness to 50
-get volume
-set volume to 75
-toggle night light
-get system theme
-```
-
-### Workspace Management
-```
-list workspaces
-switch to workspace 1
-create new workspace
-remove last workspace
-move current window to workspace 2
-```
-
-### Application Management
-```
-list installed applications
-list running applications
-launch firefox
-close firefox
-get application window information
-```
-
-### Time and Date
-```
-get current time
-get current date
-get timezone
-get calendar information
-```
-
-### System Context
-```
-show system info
-show window information
-show detailed system information
-get clipboard content
-get selected text
-get CPU usage
-get memory usage
-get running processes
-```
-
-### Tool Integration
-```
-search for a recipe and fetch its instructions
-search for news and get article content
-get system info and launch an application
-search for documentation and open it
-```
-
-### Error Handling
-```
-search with invalid query
-fetch content from invalid URL
-try to access non-existent workspace
-try to launch non-existent application
-```
-
-### UI Testing
-```
-test multi-line input
-check message history scrolling
-verify session history display
-test settings panel
-check tool status messages
-verify source citations
-```
+This project is licensed under the MIT License - see the LICENSE file for details.

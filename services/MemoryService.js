@@ -577,30 +577,84 @@ var MemoryService = GObject.registerClass({
                             log(`Found ${relevantDescriptions.length} relevant tools`);
                             
                             // Build the raw prompt
-                            const rawPrompt = `You are a helpful assistant. Available tools:\n\n${relevantDescriptions.map(tool => {
-                                let prompt = `${tool.name}: ${tool.description}\n`;
-                                if (tool.parameters) {
-                                    prompt += 'Parameters:\n';
-                                    Object.entries(tool.parameters).forEach(([name, param]) => {
-                                        prompt += `  ${name}: ${param.description}\n`;
-                                        if (param.enum) {
-                                            prompt += `    Allowed values: ${param.enum.join(', ')}\n`;
-                                        }
-                                    });
-                                }
-                                return prompt;
-                            }).join('\n')}\n\n` +
-`When you need to use a tool, respond with ONLY a JSON object in this format:\n` +
-`{"tool": "tool_name", "arguments": {"param1": "value1", ...}}\n` +
-`Do NOT include any thoughts, reasoning, or extra text. If no tool is needed, respond conversationally.\n` +
-`\nExample:\n` +
-`{"tool": "file_operations", "arguments": {"action": "list", "path": "/home/username/Documents"}}\n`;
-                            
+                            const rawPrompt = `You are a helpful assistant with access to the following tools:
+
+${relevantDescriptions.map(tool => {
+    let prompt = `Tool: ${tool.name}
+Description: ${tool.description}
+Parameters:`;
+    if (tool.parameters) {
+        Object.entries(tool.parameters).forEach(([name, param]) => {
+            prompt += `\n  - ${name}: ${param.description}`;
+            if (param.enum) {
+                prompt += `\n    Allowed values: ${param.enum.join(', ')}`;
+            }
+        });
+    }
+    return prompt;
+}).join('\n\n')}
+
+CRITICAL INSTRUCTIONS FOR TOOL USAGE:
+1. You MUST respond with ONLY a JSON object when using a tool. No other text, no XML, no explanations.
+2. The JSON object MUST follow this EXACT format:
+   {"tool": "tool_name", "arguments": {"param1": "value1", ...}}
+3. DO NOT use XML tags like <web_search> or any other format
+4. DO NOT include any text before or after the JSON object
+5. DO NOT include your thoughts or reasoning
+6. DO NOT include placeholders or waiting messages
+7. If no tool is needed, respond conversationally
+
+CORRECT EXAMPLE:
+{"tool": "web_search", "arguments": {"query": "weather forecast Memphis"}}
+
+INCORRECT EXAMPLES (DO NOT USE THESE):
+❌ <web_search query="weather forecast">
+❌ Let me search for that... {"tool": "web_search"...}
+❌ {"tool": "web_search"...} [waiting for results]
+
+Remember: Your response must be ONLY the JSON object, nothing else.`;
+
                             // Developer note: The LLM must respond with a single JSON object as above for tool calls.
                             resolve({
                                 descriptions: relevantDescriptions,
                                 raw_prompt: rawPrompt,
-                                functions: relevantDescriptions
+                                functions: relevantDescriptions,
+                                system_message: `You are a helpful assistant with access to the following tools:
+
+${relevantDescriptions.map(tool => {
+    let prompt = `Tool: ${tool.name}
+Description: ${tool.description}
+Parameters:`;
+    if (tool.parameters) {
+        Object.entries(tool.parameters).forEach(([name, param]) => {
+            prompt += `\n  - ${name}: ${param.description}`;
+            if (param.enum) {
+                prompt += `\n    Allowed values: ${param.enum.join(', ')}`;
+            }
+        });
+    }
+    return prompt;
+}).join('\n\n')}
+
+CRITICAL INSTRUCTIONS FOR TOOL USAGE:
+1. You MUST respond with ONLY a JSON object when using a tool. No other text, no XML, no explanations.
+2. The JSON object MUST follow this EXACT format:
+   {"tool": "tool_name", "arguments": {"param1": "value1", ...}}
+3. DO NOT use XML tags like <web_search> or any other format
+4. DO NOT include any text before or after the JSON object
+5. DO NOT include your thoughts or reasoning
+6. DO NOT include placeholders or waiting messages
+7. If no tool is needed, respond conversationally
+
+CORRECT EXAMPLE:
+{"tool": "web_search", "arguments": {"query": "weather forecast Memphis"}}
+
+INCORRECT EXAMPLES (DO NOT USE THESE):
+❌ <web_search query="weather forecast">
+❌ Let me search for that... {"tool": "web_search"...}
+❌ {"tool": "web_search"...} [waiting for results]
+
+Remember: Your response must be ONLY the JSON object, nothing else.`
                             });
                         } catch (e) {
                             log(`Error parsing search response: ${e.message}`);
@@ -624,7 +678,7 @@ var MemoryService = GObject.registerClass({
      */
     _getServerScript() {
         const extensionDir = Me.path;
-        const serverScript = Gio.File.new_for_path(`${extensionDir}/services/embedding_server.py`);
+        const serverScript = Gio.File.new_for_path(`${extensionDir}/services/qdrant_server.py`);
         
         if (!serverScript.query_exists(null)) {
             log(`Server script not found at: ${serverScript.get_path()}`);

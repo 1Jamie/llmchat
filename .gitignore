@@ -6,6 +6,10 @@ logs/
 embeddings/
 embeddings/*/
 
+# Qdrant data directory
+qdrant/
+qdrant/*/
+
 # Python cache files
 __pycache__/
 *.py[cod]

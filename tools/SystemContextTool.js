@@ -30,21 +30,7 @@ class SystemContextTool extends BaseTool {
             }
         });
         
-        // Log initialization with capabilities and limitations
-        log('SystemContextTool initialized with the following capabilities:');
-        log('1. Basic system information (hostname, username, OS)');
-        log('2. Detailed system information (memory, CPU, kernel)');
-        log('3. Window information and management');
-        log('4. Workspace information');
-        log('5. Clipboard and selection management');
-        log('6. Process and resource usage monitoring (CPU, RAM)');
-        log('\nIMPORTANT: This tool is for system-level information ONLY.');
-        log('DO NOT use for:');
-        log('- Web content fetching');
-        log('- URL content retrieval');
-        log('- Web searches');
-        log('- User queries');
-        log('- Any non-system related tasks');
+        log('SystemContextTool initialized - system information and monitoring only');
     }
 
     execute(params = {}) {

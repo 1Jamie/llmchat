@@ -98,12 +98,11 @@ class ProviderAdapter {
         }
 
         const provider = this._settings.get_string('service-provider');
-        log(`Making request to provider: ${provider}, tool calling: ${toolCalls ? 'enabled' : 'disabled'}`);
+        log(`Making request to provider: ${provider}`);
         
         try {
             // Extract just the user's query from the conversation history
             const userQuery = text.split('\n').filter(line => line.startsWith('User: ')).pop()?.replace('User: ', '') || text;
-            log(`Processing query: ${userQuery}`);
             
             let relevantToolsPrompt = '';
             let relevantMemories = [];
@@ -111,22 +110,16 @@ class ProviderAdapter {
             if (memoryService && memoryService._initialized) {
                 try {
                     // Step 1: Get relevant tools
-                    log(`Searching for relevant tools for query: ${userQuery}`);
                     const relevantTools = await memoryService.getRelevantToolDescriptions(userQuery);
-                    relevantToolsPrompt = relevantTools.raw_prompt;
-                    toolCalls = relevantTools.functions;
-                    log(`Retrieved ${relevantTools.descriptions.length} relevant tools for the query`);
+                    relevantToolsPrompt = relevantTools; // Pass the entire result object
+                    toolCalls = relevantTools.tools; // Use the tools array for function calls
                     
                     // Step 2: Get relevant memories
-                    log(`Searching for relevant memories for query: ${userQuery}`);
                     relevantMemories = await memoryService.getRelevantMemories(userQuery);
-                    log(`Retrieved ${relevantMemories.length} relevant memories for the query`);
                     
                     // Step 3: Add memories to the conversation context
                     if (relevantMemories.length > 0) {
                         const memoryContext = this._formatMemoryContext(relevantMemories);
-                        
-                        // Add memories to the conversation history
                         text = `${text}\n\nRelevant context from previous conversations:\n${memoryContext}`;
                     }
                 } catch (e) {
@@ -156,25 +149,7 @@ class ProviderAdapter {
                     throw new Error(`Unknown provider: ${provider}`);
             }
             
-            // If we have relevant memories, store this interaction as a new memory
-            if (relevantMemories.length > 0 && memoryService && memoryService._initialized) {
-                try {
-                    await memoryService.indexMemory({
-                        text: userQuery,
-                        context: {
-                            response: response,
-                            relevant_memories: relevantMemories.map(m => m.id),
-                            timestamp: new Date().toISOString(),
-                            type: 'conversation',
-                            importance: this._determineMemoryImportance(userQuery, response),
-                            tags: this._extractTags(userQuery, response)
-                        }
-                    });
-                } catch (e) {
-                    log(`Error storing new memory: ${e.message}`);
-                }
-            }
-            
+            // Remove automatic memory storage
             return response;
         } catch (error) {
             log(`Error in makeRequest: ${error.message}`);
@@ -212,30 +187,123 @@ class ProviderAdapter {
     }
 
     _determineMemoryImportance(query, response) {
-        // Determine memory importance based on content
-        const importantKeywords = [
-            'important', 'critical', 'urgent', 'essential',
-            'remember', 'note', 'key', 'significant'
-        ];
-        
         const text = `${query} ${response}`.toLowerCase();
         
-        // Check for important keywords
-        if (importantKeywords.some(keyword => text.includes(keyword))) {
-            return 'high';
+        // Patterns for volatile/temporary information that should not be stored
+        const volatilePatterns = [
+            // System state patterns
+            /(?:ip address|directory|current time|current date|system load|memory usage|cpu usage|disk space|process list|running processes)/i,
+            /(?:file list|directory contents|folder contents|ls output|dir output)/i,
+            /(?:window layout|workspace layout|screen layout|display configuration)/i,
+            /(?:current session|active session|user session|login session)/i,
+            
+            // Temporary state patterns
+            /(?:currently|now|right now|at the moment|presently|currently running|currently active)/i,
+            /(?:temporary|temporary state|temporary file|temp file|cache|cached)/i,
+            /(?:dynamic|dynamic content|dynamic state|changing|variable)/i,
+            
+            // System command outputs
+            /(?:command output|terminal output|console output|shell output)/i,
+            /(?:search results|query results|filtered results|sorted results)/i,
+            /(?:error log|system log|application log|debug log)/i,
+            
+            // File system operations
+            /(?:file operation|directory operation|file system|file listing|directory listing)/i,
+            /(?:file content|file contents|file data|file information)/i,
+            
+            // Network and connectivity
+            /(?:network status|connection status|connectivity|network state)/i,
+            /(?:active connection|current connection|network connection)/i,
+            
+            // Process and system monitoring
+            /(?:process status|system status|monitoring data|performance data)/i,
+            /(?:resource usage|system resources|hardware status)/i
+        ];
+
+        // Check for volatile content first
+        for (const pattern of volatilePatterns) {
+            if (pattern.test(text)) {
+                log(`Detected volatile content: ${pattern}`);
+                return 'none';
+            }
+        }
+
+        // Patterns for persistent information that should be stored
+        const persistentPatterns = [
+            // Personal preferences and settings
+            /(?:prefer|preference|like|favorite|usually|typically|always|never)/i,
+            /(?:setting|configuration|option|choice|decision)/i,
+            
+            // Personal identity and location
+            /(?:name|email|address|location|city|country|timezone)/i,
+            /(?:live in|reside in|located in|based in)/i,
+            
+            // Important decisions and relationships
+            /(?:decided to|chose to|selected|picked|opted for)/i,
+            /(?:friend|colleague|partner|family|relative)/i,
+            
+            // Significant dates and events
+            /(?:birthday|anniversary|important date|significant date)/i,
+            /(?:event|occasion|celebration|milestone)/i
+        ];
+
+        // Check for persistent content
+        let isPersistent = false;
+        for (const pattern of persistentPatterns) {
+            if (pattern.test(text)) {
+                isPersistent = true;
+                break;
+            }
+        }
+
+        // Calculate importance score based on multiple factors
+        let importanceScore = 0;
+        
+        // Factor 1: Personal Relevance (0-3 points)
+        if (isPersistent) {
+            importanceScore += 3;
         }
         
-        // Check for personal information
-        if (text.includes('name') || text.includes('password') || text.includes('email')) {
-            return 'high';
+        // Factor 2: Sentiment Strength (0-2 points)
+        const sentimentWords = {
+            positive: ['love', 'great', 'excellent', 'wonderful', 'amazing', 'perfect'],
+            negative: ['hate', 'terrible', 'awful', 'horrible', 'bad', 'poor']
+        };
+        
+        let sentimentCount = 0;
+        for (const word of [...sentimentWords.positive, ...sentimentWords.negative]) {
+            if (text.includes(word)) {
+                sentimentCount++;
+            }
+        }
+        importanceScore += Math.min(sentimentCount, 2);
+        
+        // Factor 3: Context Importance (0-2 points)
+        const importantContexts = ['important', 'critical', 'essential', 'vital', 'crucial'];
+        for (const context of importantContexts) {
+            if (text.includes(context)) {
+                importanceScore += 2;
+                break;
+            }
         }
         
-        // Check for preferences
-        if (text.includes('prefer') || text.includes('like') || text.includes('favorite')) {
+        // Factor 4: Temporal Relevance (0-2 points)
+        const temporalWords = ['always', 'never', 'forever', 'permanent', 'persistent'];
+        for (const word of temporalWords) {
+            if (text.includes(word)) {
+                importanceScore += 2;
+                break;
+            }
+        }
+        
+        // Determine final importance based on total score
+        if (importanceScore >= 6) {
+            return 'high';
+        } else if (importanceScore >= 3) {
             return 'normal';
         }
         
-        return 'normal';
+        return 'none';
     }
 
     _extractTags(query, response) {
@@ -338,6 +406,7 @@ class ProviderAdapter {
         log(`Processing response for tool calls: ${JSON.stringify(response)}`);
         let text = '';
         let toolCalls = [];
+        let memoryCommands = [];
 
         try {
             // Handle different response formats
@@ -345,6 +414,22 @@ class ProviderAdapter {
                 const message = response.choices[0].message;
                 if (message) {
                     text = message.content || '';
+                    
+                    // Extract memory commands
+                    const memoryMatches = text.match(/<memory>([\s\S]*?)<\/memory>/g);
+                    if (memoryMatches) {
+                        memoryMatches.forEach(match => {
+                            try {
+                                const memoryJson = match.match(/<memory>([\s\S]*?)<\/memory>/)[1];
+                                const memoryData = JSON.parse(memoryJson);
+                                memoryCommands.push(memoryData);
+                            } catch (e) {
+                                log(`Error parsing memory command: ${e.message}`);
+                            }
+                        });
+                        // Remove memory commands from the text
+                        text = text.replace(/<memory>[\s\S]*?<\/memory>/g, '').trim();
+                    }
                     
                     // Check for function calls in OpenAI format
                     if (message.function_call) {
@@ -368,20 +453,42 @@ class ProviderAdapter {
                 const extracted = this._extractToolCalls(text);
                 toolCalls = extracted.toolCalls;
                 text = extracted.remainingText;
-            } else if (typeof response === 'string') {
-                // Handle direct string response
-                text = response;
-                const extracted = this._extractToolCalls(text);
-                toolCalls = extracted.toolCalls;
-                text = extracted.remainingText;
-            } else if (response.tool && response.arguments) {
-                // Handle direct tool call object
-                toolCalls = [{
-                    function: {
-                        name: response.tool,
-                        arguments: JSON.stringify(response.arguments)
+                
+                // Extract memory commands
+                const memoryMatches = text.match(/<memory>([\s\S]*?)<\/memory>/g);
+                if (memoryMatches) {
+                    memoryMatches.forEach(match => {
+                        try {
+                            const memoryJson = match.match(/<memory>([\s\S]*?)<\/memory>/)[1];
+                            const memoryData = JSON.parse(memoryJson);
+                            memoryCommands.push(memoryData);
+                        } catch (e) {
+                            log(`Error parsing memory command: ${e.message}`);
+                        }
+                    });
+                    // Remove memory commands from the text
+                    text = text.replace(/<memory>[\s\S]*?<\/memory>/g, '').trim();
+                }
+            }
+
+            // Process memory commands if we have them
+            if (memoryCommands.length > 0 && memoryService && memoryService._initialized) {
+                memoryCommands.forEach(memory => {
+                    try {
+                        memoryService.indexMemory({
+                            text: memory.content,
+                            context: {
+                                type: memory.type,
+                                importance: memory.importance,
+                                context: memory.context,
+                                tags: memory.tags,
+                                timestamp: new Date().toISOString()
+                            }
+                        });
+                    } catch (e) {
+                        log(`Error storing memory: ${e.message}`);
                     }
-                }];
+                });
             }
 
             // Process thinking tags if hide-thinking is enabled
@@ -392,7 +499,7 @@ class ProviderAdapter {
             log(`Error processing tool response: ${error.message}`);
         }
 
-        log(`Processed response - text length: ${text.length}, tool calls: ${toolCalls.length}`);
+        log(`Processed response - text length: ${text.length}, tool calls: ${toolCalls.length}, memory commands: ${memoryCommands.length}`);
         return { text, toolCalls };
     }
 
@@ -678,12 +785,96 @@ class ProviderAdapter {
     _getToolSystemPrompt(relevantToolsPrompt = '') {
         // Always use the RAG system's prompt
         if (relevantToolsPrompt) {
-            log('Using relevant tool descriptions from RAG system');
-            return relevantToolsPrompt;
+            // First try to use the descriptions array, then fall back to tools array
+            const tools = relevantToolsPrompt.descriptions || relevantToolsPrompt.tools || [];
+            if (tools.length > 0) {
+                // Format the tool descriptions for the prompt
+                const toolDescriptions = tools.map(tool => {
+                    let prompt = `Tool: ${tool.name}
+Description: ${tool.description}
+Parameters:`;
+                    if (tool.parameters) {
+                        Object.entries(tool.parameters).forEach(([name, param]) => {
+                            prompt += `\n  - ${name}: ${param.description}`;
+                            if (param.enum) {
+                                prompt += `\n    Allowed values: ${param.enum.join(', ')}`;
+                            }
+                        });
+                    }
+                    return prompt;
+                }).join('\n\n');
+
+                return `You are a helpful assistant with access to the following tools:
+
+${toolDescriptions}
+
+TOOL USAGE RULES:
+1. For tool calls, respond with ONLY a JSON object: {"tool": "tool_name", "arguments": {"param1": "value1"}}
+2. No text before/after JSON, no XML tags, no explanations
+3. If no tool needed, respond conversationally
+
+MEMORY MANAGEMENT:
+When storing memories, you MUST include the memory command in your response. Format your response like this:
+
+1. First, respond to the user's main request
+2. Then, include the memory command as a separate JSON object
+3. Both the response and memory command should be in the same message
+
+Example format:
+I'll check the weather for you in Memphis. Let me search that for you.
+
+{"tool": "web_search", "arguments": {"query": "weather forecast Memphis TN"}}
+
+{"tool": "add_memory", "arguments": {
+    "text": "User lives in Memphis, TN",
+    "context": {
+        "type": "personal",
+        "importance": "high",
+        "tags": ["location", "personal"]
+    }
+}}
+
+IMPORTANT MEMORY GUIDELINES:
+1. ALWAYS complete the user's main request first
+2. ALWAYS include the memory command in your response when storing information
+3. Store memories as a side effect while performing the main task
+4. Do not let memory storage prevent you from completing the primary task
+
+DO NOT store:
+- Temporary or volatile information (current time, file listings, search results)
+- System state (open windows, running processes, network status)
+- Command outputs or tool results
+- Individual user queries unless they are very important
+- Folder contents or file listings
+- Web search results or web content
+- Dynamic/changing information
+
+DO store:
+- Personal preferences and settings
+- Important decisions and choices
+- Personal information (name, location, timezone) - ALWAYS save when mentioned
+- Significant dates and events
+- Important relationships and connections
+- Hard-to-remember technical details
+- User-specific configurations
+
+EXAMPLE OF PROPER RESPONSE WITH MEMORY:
+I'll check the weather for you in Memphis. Let me search that for you.
+
+{"tool": "web_search", "arguments": {"query": "weather forecast Memphis TN"}}
+
+{"tool": "add_memory", "arguments": {
+    "text": "User lives in Memphis, TN",
+    "context": {
+        "type": "personal",
+        "importance": "high",
+        "tags": ["location", "personal"]
+    }
+}}`;
+            }
         }
         
         // If no relevant tools found, return a minimal prompt
-        log('No relevant tools found, using minimal prompt');
         return 'You are a helpful assistant. No specific tools are available for this query. Please respond conversationally.';
     }
 }
@@ -1239,7 +1430,7 @@ class LLMChatBox {
                     // Prepare a more structured tool result text for the AI
                     const toolResultsText = toolResults.map(result => {
                         if (result.result && result.result.formatted_list) {
-                            return `Tool '${result.name}' with arguments ${JSON.stringify(result.arguments)} returned:\n${JSON.stringify({...result.result, display: result.result.formatted_list}, null, 2)}`;
+                            return `Tool '${result.name}' returned:\n${result.result.formatted_list}`;
                         } else if (result.result && result.result.results) {
                             // Format fetch_web_content results
                             const contentResults = result.result.results.map(contentResult => {
@@ -1250,14 +1441,14 @@ class LLMChatBox {
                                 }
                                 return `Error from ${contentResult.url}: ${contentResult.error || 'Unknown error'}`;
                             }).join('\n\n');
-                            return `Tool '${result.name}' with arguments ${JSON.stringify(result.arguments)} returned:\n${contentResults}`;
+                            return `Tool '${result.name}' returned:\n${contentResults}`;
                         } else {
-                            return `Tool '${result.name}' with arguments ${JSON.stringify(result.arguments)} returned:\n${JSON.stringify(result.result, null, 2)}`;
+                            return `Tool '${result.name}' returned:\n${JSON.stringify(result.result, null, 2)}`;
                         }
                     }).join('\n\n');
 
                     // Make the follow-up prompt more directive for the LLM
-                    const followUpPrompt = `I have fetched the following web content for your request. Please use this information to answer the user's question.\n\n${toolResultsText}\n\nDo not make another tool call. Use the above content to answer as fully as possible.`;
+                    const followUpPrompt = `Here are the results from the tools I used to help answer your request:\n\n${toolResultsText}\n\nPlease use this information to provide a complete answer to the user's question. Do not make additional tool calls.`;
                     
                     log(`Making follow-up request with tool results and instructions for next steps`);
                     
@@ -2241,6 +2432,10 @@ class Extension {
         // Clean up memory service
         if (memoryService) {
             try {
+                // Clear all memories before destroying the service
+                memoryService.clearNamespace('memories').catch(e => {
+                    log(`Error clearing memories: ${e.message}`);
+                });
                 memoryService.destroy();
                 log('Memory service destroyed');
             } catch (e) {

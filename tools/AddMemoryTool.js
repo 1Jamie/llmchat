@@ -10,7 +10,7 @@ class AddMemoryTool extends BaseTool {
     _init() {
         super._init({
             name: 'add_memory',
-            description: 'Add a memory to the memory system. Stores the provided text (and optional context) in the memories namespace for future retrieval. Example: {"tool": "add_memory", "arguments": {"text": "User prefers dark mode", "context": {"source": "user_preference"}}}. The text field is required, and context is optional.',
+            description: 'Add a memory to the memory system. Stores the provided text (and optional context) in the memories collection for future retrieval. Example: {"tool": "add_memory", "arguments": {"text": "User prefers dark mode", "context": {"source": "user_preference"}}}. The text field is required, and context is optional.',
             category: 'memory',
             parameters: {
                 text: {
@@ -36,12 +36,24 @@ class AddMemoryTool extends BaseTool {
 
             // Prepare the memory data
             const memoryData = {
+                namespace: 'memories',
                 documents: [{
                     id: Date.now().toString(),
                     text: text,
-                    context: context || {}
-                }],
-                namespace: 'memories'
+                    context: {
+                        timestamp: new Date().toISOString(),
+                        conversation_id: context?.conversation_id || 'default',
+                        response: context?.response || '',
+                        relevant_memories: context?.relevant_memories || [],
+                        tool_results: context?.tool_results || [],
+                        metadata: {
+                            type: context?.type || 'conversation',
+                            importance: context?.importance || 'normal',
+                            tags: context?.tags || [],
+                            source: context?.source || 'user'
+                        }
+                    }
+                }]
             };
 
             // Create and send the request
@@ -61,7 +73,11 @@ class AddMemoryTool extends BaseTool {
                     try {
                         const response = JSON.parse(msg.response_body.data);
                         log(`Memory added successfully: ${text}`);
-                        resolve({ success: true, message: 'Memory added successfully.' });
+                        resolve({ 
+                            success: true, 
+                            message: 'Memory added successfully.',
+                            indexed: response.indexed
+                        });
                     } catch (e) {
                         log(`Error parsing response: ${e.message}`);
                         resolve({ success: false, error: e.message });
@@ -69,7 +85,7 @@ class AddMemoryTool extends BaseTool {
                 });
             });
         } catch (e) {
-            log(`Error adding memory: ${e.message}`);
+            log(`Error in add_memory tool: ${e.message}`);
             return { success: false, error: e.message };
         }
     }
