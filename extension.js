@@ -234,9 +234,10 @@ class ProviderAdapter {
             /(?:prefer|preference|like|favorite|usually|typically|always|never)/i,
             /(?:setting|configuration|option|choice|decision)/i,
             
-            // Personal identity and location
-            /(?:name|email|address|location|city|country|timezone)/i,
-            /(?:live in|reside in|located in|based in)/i,
+            // Personal identity and location - Enhanced patterns
+            /(?:name|email|address|location|city|country|timezone|state|zip|postal code)/i,
+            /(?:live in|reside in|located in|based in|living in|from|hometown)/i,
+            /(?:weather|forecast|temperature|conditions|climate)/i,  // Weather-related patterns
             
             // Important decisions and relationships
             /(?:decided to|chose to|selected|picked|opted for)/i,
@@ -249,9 +250,18 @@ class ProviderAdapter {
 
         // Check for persistent content
         let isPersistent = false;
+        let isLocationInfo = false;
+        
         for (const pattern of persistentPatterns) {
             if (pattern.test(text)) {
                 isPersistent = true;
+                // Check specifically for location patterns
+                if (pattern.toString().includes('location') || 
+                    pattern.toString().includes('live in') || 
+                    pattern.toString().includes('reside in') ||
+                    pattern.toString().includes('weather')) {
+                    isLocationInfo = true;
+                }
                 break;
             }
         }
@@ -337,12 +347,16 @@ class ProviderAdapter {
         let remainingText = text;
         let matches = [];
         let i = 0;
+        
+        // First try to find complete JSON objects
         while (i < text.length) {
             if (text[i] === '{') {
                 let stack = 1;
                 let j = i + 1;
                 let inString = false;
                 let escape = false;
+                
+                // Find the matching closing brace
                 while (j < text.length && stack > 0) {
                     if (inString) {
                         if (escape) {
@@ -363,6 +377,7 @@ class ProviderAdapter {
                     }
                     j++;
                 }
+                
                 if (stack === 0) {
                     const candidate = text.slice(i, j);
                     try {
@@ -370,16 +385,19 @@ class ProviderAdapter {
                         if (parsed.tool && parsed.arguments) {
                             matches.push({ parsed, match: candidate });
                         }
-                    } catch (e) {}
+                    } catch (e) {
+                        log(`Failed to parse JSON: ${e.message}`);
+                    }
                     i = j;
                 } else {
-                    break; // Unmatched brace
+                    i++;
                 }
             } else {
                 i++;
             }
         }
-        // Remove duplicates
+        
+        // Remove duplicates while preserving order
         const seen = new Set();
         const uniqueMatches = [];
         for (const m of matches) {
@@ -389,7 +407,8 @@ class ProviderAdapter {
                 uniqueMatches.push(m);
             }
         }
-        // Remove each JSON from the text
+        
+        // Process each unique match
         for (const { parsed, match } of uniqueMatches) {
             toolCalls.push({
                 function: {
@@ -399,6 +418,8 @@ class ProviderAdapter {
             });
             remainingText = remainingText.replace(match, '').trim();
         }
+        
+        log(`Extracted ${toolCalls.length} tool calls from response`);
         return { toolCalls, remainingText };
     }
 
@@ -414,6 +435,10 @@ class ProviderAdapter {
                 const message = response.choices[0].message;
                 if (message) {
                     text = message.content || '';
+                    
+                    // Remove markdown code blocks
+                    text = text.replace(/```json\n?([\s\S]*?)```/g, '$1');
+                    text = text.replace(/```\n?([\s\S]*?)```/g, '$1');
                     
                     // Extract memory commands
                     const memoryMatches = text.match(/<memory>([\s\S]*?)<\/memory>/g);
@@ -450,6 +475,11 @@ class ProviderAdapter {
             } else if (response.response) {
                 // Handle Ollama-style response
                 text = response.response;
+                
+                // Remove markdown code blocks
+                text = text.replace(/```json\n?([\s\S]*?)```/g, '$1');
+                text = text.replace(/```\n?([\s\S]*?)```/g, '$1');
+                
                 const extracted = this._extractToolCalls(text);
                 toolCalls = extracted.toolCalls;
                 text = extracted.remainingText;
@@ -471,7 +501,7 @@ class ProviderAdapter {
                 }
             }
 
-            // Process memory commands if we have them
+            // Process memory commands if we have them - do this silently without UI feedback
             if (memoryCommands.length > 0 && memoryService && memoryService._initialized) {
                 memoryCommands.forEach(memory => {
                     try {
@@ -485,6 +515,8 @@ class ProviderAdapter {
                                 timestamp: new Date().toISOString()
                             }
                         });
+                        // Log success but don't show in UI
+                        log(`Memory added silently: ${memory.content}`);
                     } catch (e) {
                         log(`Error storing memory: ${e.message}`);
                     }
@@ -495,6 +527,11 @@ class ProviderAdapter {
             if (this._settings.get_boolean('hide-thinking')) {
                 text = text.replace(/<think>[\s\S]*?<\/think>/g, '');
             }
+
+            // Clean up any remaining JSON artifacts from the text
+            text = text.replace(/\{[\s\S]*?\}/g, '').trim();
+            text = text.replace(/\[[\s\S]*?\]/g, '').trim();
+            text = text.replace(/^\s*[\n\r]+/gm, '').trim(); // Remove empty lines
         } catch (error) {
             log(`Error processing tool response: ${error.message}`);
         }
@@ -782,100 +819,48 @@ class ProviderAdapter {
         });
     }
 
-    _getToolSystemPrompt(relevantToolsPrompt = '') {
-        // Always use the RAG system's prompt
-        if (relevantToolsPrompt) {
-            // First try to use the descriptions array, then fall back to tools array
-            const tools = relevantToolsPrompt.descriptions || relevantToolsPrompt.tools || [];
-            if (tools.length > 0) {
-                // Format the tool descriptions for the prompt
-                const toolDescriptions = tools.map(tool => {
-                    let prompt = `Tool: ${tool.name}
-Description: ${tool.description}
-Parameters:`;
-                    if (tool.parameters) {
-                        Object.entries(tool.parameters).forEach(([name, param]) => {
-                            prompt += `\n  - ${name}: ${param.description}`;
-                            if (param.enum) {
-                                prompt += `\n    Allowed values: ${param.enum.join(', ')}`;
-                            }
-                        });
-                    }
-                    return prompt;
-                }).join('\n\n');
-
-                return `You are a helpful assistant with access to the following tools:
-
-${toolDescriptions}
-
-TOOL USAGE RULES:
-1. For tool calls, respond with ONLY a JSON object: {"tool": "tool_name", "arguments": {"param1": "value1"}}
-2. No text before/after JSON, no XML tags, no explanations
-3. If no tool needed, respond conversationally
-
-MEMORY MANAGEMENT:
-When storing memories, you MUST include the memory command in your response. Format your response like this:
-
-1. First, respond to the user's main request
-2. Then, include the memory command as a separate JSON object
-3. Both the response and memory command should be in the same message
-
-Example format:
-I'll check the weather for you in Memphis. Let me search that for you.
-
-{"tool": "web_search", "arguments": {"query": "weather forecast Memphis TN"}}
-
-{"tool": "add_memory", "arguments": {
-    "text": "User lives in Memphis, TN",
-    "context": {
-        "type": "personal",
-        "importance": "high",
-        "tags": ["location", "personal"]
-    }
-}}
-
-IMPORTANT MEMORY GUIDELINES:
-1. ALWAYS complete the user's main request first
-2. ALWAYS include the memory command in your response when storing information
-3. Store memories as a side effect while performing the main task
-4. Do not let memory storage prevent you from completing the primary task
-
-DO NOT store:
-- Temporary or volatile information (current time, file listings, search results)
-- System state (open windows, running processes, network status)
-- Command outputs or tool results
-- Individual user queries unless they are very important
-- Folder contents or file listings
-- Web search results or web content
-- Dynamic/changing information
-
-DO store:
-- Personal preferences and settings
-- Important decisions and choices
-- Personal information (name, location, timezone) - ALWAYS save when mentioned
-- Significant dates and events
-- Important relationships and connections
-- Hard-to-remember technical details
-- User-specific configurations
-
-EXAMPLE OF PROPER RESPONSE WITH MEMORY:
-I'll check the weather for you in Memphis. Let me search that for you.
-
-{"tool": "web_search", "arguments": {"query": "weather forecast Memphis TN"}}
-
-{"tool": "add_memory", "arguments": {
-    "text": "User lives in Memphis, TN",
-    "context": {
-        "type": "personal",
-        "importance": "high",
-        "tags": ["location", "personal"]
-    }
-}}`;
-            }
+    _getToolSystemPrompt(relevantToolsPrompt) {
+        // Format tools as a string if it's an object
+        let toolsString = '';
+        if (typeof relevantToolsPrompt === 'object') {
+            toolsString = JSON.stringify(relevantToolsPrompt, null, 2);
+        } else {
+            toolsString = relevantToolsPrompt || '';
         }
-        
-        // If no relevant tools found, return a minimal prompt
-        return 'You are a helpful assistant. No specific tools are available for this query. Please respond conversationally.';
+
+        return `You are a helpful assistant with access to these tools:
+
+${toolsString}
+
+CRITICAL TOOL USAGE RULES:
+1. NEVER explain how to use tools or provide examples of tool calls
+2. NEVER include tool call JSON in explanations or examples
+3. ONLY output tool call JSON when you are actually executing a tool
+4. When using tools, output ONLY the raw JSON objects: {"tool": "name", "arguments": {"param": "value"}}
+5. DO NOT use markdown, code blocks, or any extra formatting around tool call JSON
+6. DO NOT include any text before or after the JSON objects
+7. You can make MULTIPLE tool calls in a single response by including multiple JSON objects
+8. Respond conversationally if no tool is needed
+
+MEMORY RULES (IMPORTANT):
+- NEVER mention, reference, or allude to memory storage or memory commands in your response to the user
+- When storing memories, include the memory command as a separate JSON object (see tool usage above)
+- Store memories as a side effect only, never as the main point of your response
+- ALWAYS store personal information when it is shared (name, location, timezone, preferences)
+- ALWAYS store important decisions and user preferences
+- ALWAYS store technical details and configurations that might be needed later
+
+EXAMPLES OF WHEN TO STORE MEMORIES:
+1. User shares their location: {"tool": "add_memory", "arguments": {"text": "User's location is Cordova, TN", "context": {"type": "personal_info", "importance": "high"}}}
+2. User sets a preference: {"tool": "add_memory", "arguments": {"text": "User prefers dark mode", "context": {"type": "preference", "importance": "high"}}}
+3. User makes a decision: {"tool": "add_memory", "arguments": {"text": "User chose to use Brave Search as default", "context": {"type": "decision", "importance": "high"}}}
+
+DON'T STORE:
+- Temporary info (time, listings, results)
+- System state
+- Command outputs
+- Web content
+- Dynamic data`;
     }
 }
 
@@ -1259,6 +1244,11 @@ class LLMChatBox {
         // Log tool calls for debugging
         log(`Handling tool calls: ${JSON.stringify(toolCalls)}`);
         
+        // Display the original response text first if it exists
+        if (originalResponse && originalResponse.trim()) {
+            this._addMessage(originalResponse, 'ai');
+        }
+        
         // Check for tool call limits and loops
         this._toolCallCount++;
         if (this._toolCallCount > this._maxToolCalls) {
@@ -1315,91 +1305,58 @@ class LLMChatBox {
         if (lastChild && lastChild._isThinking) {
             this._messageContainer.remove_child(lastChild);
         }
-        
-        // Create an array of promises for all tool calls
-        const toolPromises = toolCalls.map(toolCall => {
-            return new Promise((resolve, reject) => {
-                try {
-                    log(`Executing tool call: ${toolCall.function.name} with args: ${toolCall.function.arguments}`);
-                    let args;
-                    try {
-                        args = JSON.parse(toolCall.function.arguments);
-                    } catch (e) {
-                        log(`Failed to parse arguments JSON: ${e.message}, using as-is`);
-                        args = toolCall.function.arguments;
-                    }
-                    const runTool = (toolCallObj) => {
-                        const result = this._executeToolCall(toolCallObj);
-                        if (result instanceof Promise) {
-                            result.then(r => resolve({
-                                toolName: toolCallObj.name,
-                                args: toolCallObj.arguments,
-                                result: r
-                            })).catch(reject);
-                        } else {
-                            resolve({
-                                toolName: toolCallObj.name,
-                                args: toolCallObj.arguments,
-                                result: result
-                            });
-                        }
-                    };
-                    // First run the tool call
-                    const result = this._executeToolCall({
-                        name: toolCall.function.name,
-                        arguments: args
-                    });
-                    const handleResult = (r) => {
-                        if (r && r.confirmation_required) {
-                            this._addConfirmationMessage(r.summary, r.params).then(() => {
-                                // On confirm, run the tool call with confirm: true
-                                const confirmedToolCall = {
-                                    name: r.params.tool || r.params.tool_name || toolCall.function.name,
-                                    arguments: r.params
-                                };
-                                runTool(confirmedToolCall);
-                            }).catch(() => {
-                                // If denied, resolve with error result
-                            resolve({
-                                toolName: toolCall.function.name,
-                                args: args,
-                                    result: { error: 'Action was not confirmed by the user.' }
-                            });
-                        });
-                            return;
-                        }
-                        log(`Tool ${toolCall.function.name} returned result: ${JSON.stringify(r)}`);
-                        resolve({
-                            toolName: toolCall.function.name,
-                            args: args,
-                            result: r
-                        });
-                    };
-                    if (result instanceof Promise) {
-                        result.then(handleResult).catch(e => {
-                            log(`Tool ${toolCall.function.name} Promise error: ${e.message}`);
-                            reject(e);
-                        });
-                    } else {
-                        handleResult(result);
-                    }
-                } catch (error) {
-                    log(`Error executing tool call: ${error.message}`);
-                    reject(error);
+
+        // Create promises for each tool call
+        const toolPromises = toolCalls.map(async call => {
+            const toolName = call.function.name;
+            let args;
+            try {
+                args = JSON.parse(call.function.arguments);
+            } catch (e) {
+                log(`Error parsing tool arguments: ${e.message}`);
+                return { toolName, args: call.function.arguments, result: { error: 'Invalid arguments format' } };
+            }
+
+            // Find the tool
+            const tool = this.tools.find(t => t.name === toolName);
+            if (!tool) {
+                log(`Tool not found: ${toolName}`);
+                return { toolName, args, result: { error: `Tool ${toolName} not found` } };
+            }
+
+            try {
+                // Execute the tool
+                const result = await tool.execute(args);
+                
+                // For memory tool calls, don't show the result in the UI
+                if (toolName === 'add_memory') {
+                    log(`Memory tool call executed silently: ${JSON.stringify(result)}`);
+                    return { toolName, args, result: { success: true, message: 'Memory added silently' } };
                 }
-            });
+                
+                return { toolName, args, result };
+            } catch (e) {
+                log(`Error executing tool ${toolName}: ${e.message}`);
+                return { toolName, args, result: { error: e.message } };
+            }
         });
 
         // Wait for all tool calls to complete
         Promise.all(toolPromises)
             .then(results => {
                 log(`All tool calls completed, processing results`);
-                // Show user-friendly status message for each tool result
+                
+                // Check if all tool calls were memory-related
+                const allMemoryCalls = results.every(result => result.toolName === 'add_memory');
+                
+                // Show user-friendly status message for each tool result, excluding memory tool calls
                 results.forEach(result => {
-                    if (result.result && result.result.message) {
-                        this._addMessage(result.result.message, 'system');
-                    } else if (result.result && result.result.error) {
-                        this._addMessage(`❌ Tool error: ${result.result.error}`, 'system');
+                    if (result.toolName !== 'add_memory') {
+                        if (result.result && result.result.message) {
+                            this._addMessage(result.result.message, 'system');
+                        } else if (result.result && result.result.error) {
+                            this._addMessage(`❌ Tool error: ${result.result.error}`, 'system');
+                        }
                     }
                 });
                 
@@ -1410,17 +1367,21 @@ class LLMChatBox {
                     result: result.result
                 }));
 
-                // If we have tool results, make a follow-up request
-                if (toolResults.length > 0) {
-                    // Create a simplified status message for the UI
+                // If we have tool results and they're not all memory calls, make a follow-up request
+                if (toolResults.length > 0 && !allMemoryCalls) {
+                    // Create a simplified status message for the UI, excluding memory tool calls
                     let toolStatusMessage = "Tool execution status:\n";
                     toolResults.forEach(result => {
-                        const status = result.result?.error ? "Failed" : "Success";
-                        toolStatusMessage += `• ${result.name}: ${status}\n`;
+                        if (result.name !== 'add_memory') {
+                            const status = result.result?.error ? "Failed" : "Success";
+                            toolStatusMessage += `• ${result.name}: ${status}\n`;
+                        }
                     });
                     
-                    // Display simplified tool status as system message
-                    this._addMessage(toolStatusMessage, 'system', false, toolResults);
+                    // Only show tool status if there are non-memory tools
+                    if (toolResults.some(r => r.name !== 'add_memory')) {
+                        this._addMessage(toolStatusMessage, 'system', false, toolResults);
+                    }
                     
                     // Build history of all tool calls made in this session
                     const toolCallHistory = this._recentToolCalls.map(calls => {
@@ -1530,8 +1491,14 @@ class LLMChatBox {
                             this._addMessage(`Error in follow-up request: ${error.message}`, 'ai');
                         });
                 } else {
-                    // If no tool results, just show the original response
-                    this._addMessage(originalResponse, 'ai');
+                    // If all tool calls were memory-related or no tool results, just show the original response
+                    if (originalResponse) {
+                        this._addMessage(originalResponse, 'ai');
+                    }
+                    
+                    // Reset counters
+                    this._toolCallCount = 0;
+                    this._recentToolCalls = [];
                 }
             })
             .catch(error => {
@@ -1541,131 +1508,76 @@ class LLMChatBox {
     }
 
     _getConversationHistory() {
-        // Get the last 10 messages for context
-        const recentMessages = this._messages.slice(-10);
+        // Configurable token budget (can be set in settings or as a constant)
+        const MAX_TOKENS = this._settings.get_int('max-context-tokens') || 2000;
+        const IMPORTANT_SENDERS = ['system', 'tool', 'memory'];
+        const recentMessages = [...this._messages];
         let history = '';
         let tokenCount = 0;
-        const MAX_TOKENS = 2000; // Approximate token limit for context
-        
-        // Helper function to estimate tokens (rough approximation)
-        const estimateTokens = (text) => {
-            // Rough estimate: 1 token ≈ 4 characters for English text
-            return Math.ceil(text.length / 4);
+        let omittedCount = 0;
+        let importantMessages = [];
+
+        // Helper: estimate tokens (rough, 1 token ≈ 4 chars)
+        const estimateTokens = (text) => Math.ceil(text.length / 4);
+
+        // Helper: concise message formatting
+        const formatMessage = (msg) => {
+            if (msg.isThinking) return '';
+            if (msg.sender === 'user') return `User: ${msg.text}\n`;
+            if (msg.sender === 'ai') return `Assistant: ${msg.text}\n`;
+            if (msg.sender === 'system') return `System: ${msg.text}\n`;
+            if (msg.sender === 'tool' || msg.sender === 'memory') return `System: ${msg.text}\n`;
+            return '';
         };
 
-        // Helper function to truncate text to fit within token limit
-        const truncateToTokens = (text, maxTokens) => {
-            const estimatedTokens = estimateTokens(text);
-            if (estimatedTokens <= maxTokens) return text;
-            
-            // Truncate to approximately the right number of characters
-            const maxChars = maxTokens * 4;
-            return text.substring(0, maxChars) + '...';
-        };
-
-        // Process messages in reverse to prioritize recent context
-        for (let i = recentMessages.length - 1; i >= 0; i--) {
-            const msg = recentMessages[i];
-            let messageText = '';
-
-            if (msg.isThinking && msg.text) {
-                // Include <think> content
-                messageText = `<think>${msg.text}</think>\n`;
-            } else if (msg.sender === 'user') {
-                messageText = `User: ${msg.text}\n`;
-            } else if (msg.sender === 'ai') {
-                // For AI messages, only include non-thinking content if thinking is hidden
-                let aiText = msg.text;
-                if (this._settings.get_boolean('hide-thinking')) {
-                    aiText = aiText.replace(/<think>[\s\S]*?<\/think>/g, '');
-                }
-                messageText = `Assistant: ${aiText}\n`;
-            } else if (msg.sender === 'system' && msg.toolResults) {
-                // For tool results, include full tool call and response
-                msg.toolResults.forEach(result => {
-                    // Tool call
-                    messageText += `Tool Call: {\"tool\": \"${result.name}\", \"arguments\": ${JSON.stringify(result.arguments)}}\n`;
-
-                    // Format tool response based on tool type
-                    if (result.name === 'web_search' && result.result && result.result.results) {
-                        messageText += 'Web Search Results:\n';
-                        if (result.result.structured_results) {
-                            // Use the structured format for better context
-                            const structured = result.result.structured_results;
-                            messageText += `Query: "${structured.query}"\n`;
-                            messageText += `Total Results: ${structured.total_results}\n\n`;
-                            
-                            structured.top_results.forEach(item => {
-                                messageText += `[${item.rank}] ${item.title}\n`;
-                                messageText += `Source: ${item.source}\n`;
-                                messageText += `URL: ${item.url}\n`;
-                                if (item.published_date) {
-                                    messageText += `Published: ${item.published_date}\n`;
-                                }
-                                messageText += `Relevance: ${item.relevance_score || 'N/A'}\n`;
-                                messageText += `Summary: ${item.summary}\n\n`;
-                            });
-                        } else {
-                            // Fallback to the old format if structured results aren't available
-                        result.result.results.forEach((item, idx) => {
-                                messageText += `[${idx+1}] ${item.title}\n`;
-                                messageText += `URL: ${item.url}\n`;
-                                messageText += `Summary: ${item.content || 'No summary available'}\n\n`;
-                        });
-                    }
-                    } else if (result.name === 'fetch_web_content' && result.result && result.result.results) {
-                        messageText += 'Fetched Content:\n';
-                        result.result.results.forEach((item, idx) => {
-                            if (item.formatted_content) {
-                                messageText += `[${idx+1}] ${item.title || 'Untitled'}\n`;
-                                messageText += `URL: ${item.url}\n`;
-                                messageText += `Content: ${item.formatted_content}\n\n`;
-                            } else if (item.content) {
-                                messageText += `[${idx+1}] ${item.title || 'Untitled'}\n`;
-                                messageText += `URL: ${item.url}\n`;
-                                messageText += `Content: ${item.content}\n\n`;
-                            } else {
-                                messageText += `[${idx+1}] Error from ${item.url}: ${item.error || 'Unknown error'}\n\n`;
-                            }
-                        });
-                    } else {
-                        // For other tools, include the full result
-                        messageText += `Tool Response: ${JSON.stringify(result.result, null, 2)}\n`;
-                    }
-                });
+        // Always include important messages (system/tool/memory)
+        for (const msg of recentMessages) {
+            if (IMPORTANT_SENDERS.includes(msg.sender)) {
+                importantMessages.push(msg);
             }
+        }
+        // Remove duplicates
+        importantMessages = importantMessages.filter((msg, idx, arr) =>
+            arr.findIndex(m => m.text === msg.text && m.sender === msg.sender) === idx
+        );
 
-            // Check if adding this message would exceed token limit
-            const messageTokens = estimateTokens(messageText);
-            if (tokenCount + messageTokens > MAX_TOKENS) {
-                // If we're about to exceed the limit, truncate the message
-                const remainingTokens = MAX_TOKENS - tokenCount;
-                if (remainingTokens > 100) { // Only add if we have enough tokens left for meaningful content
-                    messageText = truncateToTokens(messageText, remainingTokens);
-                    history = messageText + history;
-                }
-                break;
-            }
-
-            history = messageText + history;
-            tokenCount += messageTokens;
+        // Add important messages first
+        for (const msg of importantMessages) {
+            const formatted = formatMessage(msg);
+            const msgTokens = estimateTokens(formatted);
+            if (tokenCount + msgTokens > MAX_TOKENS * 0.5) break; // Don't let important messages use more than half
+            history += formatted;
+            tokenCount += msgTokens;
         }
 
-        // Add a summary of older context if we have room
-        if (this._messages.length > 10 && tokenCount < MAX_TOKENS * 0.8) {
-            const olderMessages = this._messages.slice(0, -10);
-            const summary = `[Previous ${olderMessages.length} messages omitted for brevity]\n`;
+        // Add as many recent messages as possible (sliding window, newest to oldest)
+        let slidingHistory = '';
+        let slidingTokens = 0;
+        for (let i = recentMessages.length - 1; i >= 0; i--) {
+            const msg = recentMessages[i];
+            if (importantMessages.includes(msg)) continue; // Already included
+            const formatted = formatMessage(msg);
+            const msgTokens = estimateTokens(formatted);
+            if (tokenCount + slidingTokens + msgTokens > MAX_TOKENS) {
+                omittedCount = i + 1;
+                break;
+            }
+            slidingHistory = formatted + slidingHistory;
+            slidingTokens += msgTokens;
+        }
+        history += slidingHistory;
+        tokenCount += slidingTokens;
+
+        // Add summary if older context omitted
+        if (omittedCount > 0) {
+            const summary = `[Previous ${omittedCount} messages omitted for brevity]\n`;
             if (tokenCount + estimateTokens(summary) <= MAX_TOKENS) {
                 history = summary + history;
             }
         }
 
-        // Add a context summary at the beginning
-        const contextSummary = this._generateContextSummary();
-        if (contextSummary && tokenCount + estimateTokens(contextSummary) <= MAX_TOKENS) {
-            history = contextSummary + '\n\n' + history;
-        }
-
+        // Debug log the final prompt
+        log(`[DEBUG] Final prompt sent to LLM (token est: ${tokenCount}):\n${history}`);
         return history;
     }
 

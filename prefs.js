@@ -242,6 +242,29 @@ function fillPreferencesWindow(window) {
         providerSettings[provider].add(row);
     });
 
+    // Max context tokens (common setting)
+    const maxContextTokensRow = new Adw.ActionRow({
+        title: 'Max Context Tokens',
+        subtitle: 'Maximum tokens of chat history/context sent to the LLM (higher = more context, lower = faster)'
+    });
+    const maxContextTokensScale = new Gtk.Scale({
+        orientation: Gtk.Orientation.HORIZONTAL,
+        adjustment: new Gtk.Adjustment({
+            lower: 500,
+            upper: 8000,
+            step_increment: 100,
+            page_increment: 500,
+            value: settings.get_int('max-context-tokens') || 2000
+        }),
+        digits: 0,
+        draw_value: true
+    });
+    maxContextTokensScale.connect('value-changed', widget => {
+        settings.set_int('max-context-tokens', Math.round(widget.get_value()));
+    });
+    maxContextTokensRow.add_suffix(maxContextTokensScale);
+    commonSettings.add(maxContextTokensRow);
+
     // Max response length (common setting)
     const maxResponseLengthRow = new Adw.ActionRow({
         title: 'Max Response Length',

@@ -10,8 +10,9 @@ class AddMemoryTool extends BaseTool {
     _init() {
         super._init({
             name: 'add_memory',
-            description: 'Add a memory to the memory system. Stores the provided text (and optional context) in the memories collection for future retrieval. Example: {"tool": "add_memory", "arguments": {"text": "User prefers dark mode", "context": {"source": "user_preference"}}}. The text field is required, and context is optional.',
+            description: 'Store important information in the memory system for future reference. Use this tool when you need to: save user preferences, remember personal information, store important decisions, or keep track of significant details. The memory system can store text with optional context metadata (like importance level, tags, or source). This tool is essential for maintaining continuity in conversations and remembering user-specific information. Use it whenever you learn something important about the user or their preferences.',
             category: 'memory',
+            keywords: ['memory', 'remember', 'store', 'save', 'preference', 'information', 'context', 'metadata', 'tag', 'important', 'reference', 'future', 'recall', 'retrieve', 'persist'],
             parameters: {
                 text: {
                     type: 'string',

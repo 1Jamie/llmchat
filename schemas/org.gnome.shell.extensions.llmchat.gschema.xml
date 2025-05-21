@@ -4,13 +4,14 @@
     <key name="service-provider" type="s">
       <default>'openai'</default>
       <summary>AI Service Provider</summary>
-      <description>The service provider to use for AI interactions (openai, gemini, anthropic, llama, ollama).</description>
+      <description>The service provider to use for AI interactions (openai, gemini, anthropic,
+        llama, ollama).</description>
       <choices>
-        <choice value='openai'/>
-        <choice value='gemini'/>
-        <choice value='anthropic'/>
-        <choice value='llama'/>
-        <choice value='ollama'/>
+        <choice value='openai' />
+        <choice value='gemini' />
+        <choice value='anthropic' />
+        <choice value='llama' />
+        <choice value='ollama' />
       </choices>
     </key>
     <key name="openai-api-key" type="s">
@@ -22,14 +23,14 @@
       <default>'gpt-3.5-turbo'</default>
       <summary>OpenAI Model</summary>
       <description>The model to use for OpenAI (e.g., gpt-3.5-turbo, gpt-4).</description>
-       <choices>
-          <choice value='gpt-3.5-turbo'/>
-          <choice value='gpt-4'/>
+      <choices>
+        <choice value='gpt-3.5-turbo' />
+        <choice value='gpt-4' />
       </choices>
     </key>
     <key name="openai-temperature" type="d">
       <default>0.7</default>
-      <range min="0.0" max="2.0"/>
+      <range min="0.0" max="2.0" />
       <summary>OpenAI Temperature</summary>
       <description>Controls randomness: lower values make the output more deterministic (0.0-2.0).</description>
     </key>
@@ -40,7 +41,7 @@
     </key>
     <key name="gemini-temperature" type="d">
       <default>0.7</default>
-      <range min="0.0" max="2.0"/>
+      <range min="0.0" max="2.0" />
       <summary>Gemini Temperature</summary>
       <description>Controls randomness: lower values make the output more deterministic (0.0-2.0).</description>
     </key>
@@ -50,24 +51,24 @@
       <description>API key for Anthropic service.</description>
     </key>
     <key name="anthropic-model" type="s">
-        <default>'claude-2'</default>
-        <summary>Anthropic Model</summary>
-        <description>The model to use for Anthropic (e.g., claude-2, claude-instant-1).</description>
-          <choices>
-              <choice value='claude-2'/>
-              <choice value='claude-instant-1'/>
-          </choices>
+      <default>'claude-2'</default>
+      <summary>Anthropic Model</summary>
+      <description>The model to use for Anthropic (e.g., claude-2, claude-instant-1).</description>
+      <choices>
+        <choice value='claude-2' />
+        <choice value='claude-instant-1' />
+      </choices>
     </key>
     <key name="anthropic-temperature" type="d">
       <default>0.7</default>
-      <range min="0.0" max="1.0"/>
+      <range min="0.0" max="1.0" />
       <summary>Anthropic Temperature</summary>
       <description>Controls randomness: lower values make the output more deterministic (0.0-1.0).</description>
     </key>
     <key name="anthropic-max-tokens" type="i">
-        <default>500</default>
-        <summary>Anthropic Max tokens</summary>
-        <description>Max tokens to sample from the Anthropic Model</description>
+      <default>500</default>
+      <summary>Anthropic Max tokens</summary>
+      <description>Max tokens to sample from the Anthropic Model</description>
     </key>
     <key name="llama-server-url" type="s">
       <default>'http://localhost:8080'</default>
@@ -81,11 +82,11 @@
     </key>
     <key name="llama-temperature" type="d">
       <default>0.7</default>
-      <range min="0.0" max="2.0"/>
+      <range min="0.0" max="2.0" />
       <summary>Llama Temperature</summary>
       <description>Controls randomness: lower values make the output more deterministic (0.0-2.0).</description>
     </key>
-     <key name="max-response-length" type="i">
+    <key name="max-response-length" type="i">
       <default>2000</default>
       <summary>Maximum Response Length</summary>
       <description>The maximum length of responses in characters.</description>
@@ -98,11 +99,12 @@
     <key name="ollama-model-name" type="s">
       <default>'llama2'</default>
       <summary>Ollama Model Name</summary>
-      <description>The model name to use when calling the Ollama server API (e.g., llama2, mistral, codellama).</description>
+      <description>The model name to use when calling the Ollama server API (e.g., llama2, mistral,
+        codellama).</description>
     </key>
     <key name="ollama-temperature" type="d">
       <default>0.7</default>
-      <range min="0.0" max="2.0"/>
+      <range min="0.0" max="2.0" />
       <summary>Ollama Temperature</summary>
       <description>Controls randomness: lower values make the output more deterministic (0.0-2.0).</description>
     </key>
@@ -110,6 +112,14 @@
       <default>false</default>
       <summary>Hide Thinking Messages</summary>
       <description>Hide the "thinking" messages while waiting for responses</description>
+    </key>
+    <key name="max-context-tokens" type="i">
+      <default>2000</default>
+      <summary>Maximum tokens for chat context</summary>
+      <description>
+        The maximum number of tokens to include in the chat context sent to the LLM. Increase for
+        more context, decrease for performance.
+      </description>
     </key>
     <key name="brave-search-api-key" type="s">
       <default>''</default>

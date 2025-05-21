@@ -335,7 +335,8 @@ var MemoryService = GObject.registerClass({
                 name: tool.name,
                 description: tool.description,
                 category: tool.category || 'general',
-                parameters: tool.parameters
+                parameters: tool.parameters,
+                keywords: tool.keywords || []
             }));
             
             log(`Loaded ${this._toolDescriptions.length} tool descriptions into memory`);
@@ -346,10 +347,12 @@ var MemoryService = GObject.registerClass({
                 // Compare description and parameters
                 const indexed = currentIndexed[tool.name];
                 if (!indexed) return true;
-                return indexed.description !== tool.description || JSON.stringify(indexed.parameters) !== JSON.stringify(tool.parameters);
+                return indexed.description !== tool.description || 
+                       JSON.stringify(indexed.parameters) !== JSON.stringify(tool.parameters) ||
+                       JSON.stringify(indexed.keywords) !== JSON.stringify(tool.keywords);
             }).map(tool => ({
                 id: tool.name,
-                text: `${tool.name}: ${tool.description}\nParameters: ${JSON.stringify(tool.parameters)}`
+                text: `${tool.name}: ${tool.description}\nKeywords: ${tool.keywords.join(', ')}\nParameters: ${JSON.stringify(tool.parameters)}`
             }));
 
             if (formattedDescriptions.length > 0) {
@@ -549,7 +552,8 @@ var MemoryService = GObject.registerClass({
                 const payload = JSON.stringify({
                     query,
                     top_k,
-                    namespaces: ['tools']  // Only search in tools namespace
+                    namespaces: ['tools'],  // Only search in tools namespace
+                    min_score: 0.05  // Lower threshold for better recall
                 });
                 
                 message.set_request_body_from_bytes('application/json', new GLib.Bytes(payload));
@@ -573,13 +577,32 @@ var MemoryService = GObject.registerClass({
                                 }
                                 return toolDescription || null;
                             }).filter(Boolean);
-                            
-                            log(`Found ${relevantDescriptions.length} relevant tools`);
+
+                            // Check for keyword matches
+                            const lowerQuery = query.toLowerCase();
+                            const keywordMatches = this._toolDescriptions.filter(tool => {
+                                if (!tool.keywords) return false;
+                                return tool.keywords.some(keyword => 
+                                    lowerQuery.includes(keyword.toLowerCase())
+                                );
+                            });
+
+                            // Combine semantic matches with keyword matches, removing duplicates
+                            const allMatches = new Map();
+                            relevantDescriptions.forEach(tool => {
+                                allMatches.set(tool.name, tool);
+                            });
+                            keywordMatches.forEach(tool => {
+                                allMatches.set(tool.name, tool);
+                            });
+
+                            const finalDescriptions = Array.from(allMatches.values());
+                            log(`Found ${finalDescriptions.length} relevant tools (${relevantDescriptions.length} semantic matches, ${keywordMatches.length} keyword matches)`);
                             
                             // Build the raw prompt
                             const rawPrompt = `You are a helpful assistant with access to the following tools:
 
-${relevantDescriptions.map(tool => {
+${finalDescriptions.map(tool => {
     let prompt = `Tool: ${tool.name}
 Description: ${tool.description}
 Parameters:`;
@@ -599,62 +622,25 @@ CRITICAL INSTRUCTIONS FOR TOOL USAGE:
 2. The JSON object MUST follow this EXACT format:
    {"tool": "tool_name", "arguments": {"param1": "value1", ...}}
 3. DO NOT use XML tags like <web_search> or any other format
-4. DO NOT include any text before or after the JSON object
+4. DO NOT use any other formatting or tags like markdown or html.
 5. DO NOT include your thoughts or reasoning
 6. DO NOT include placeholders or waiting messages
 7. If no tool is needed, respond conversationally
-
 CORRECT EXAMPLE:
 {"tool": "web_search", "arguments": {"query": "weather forecast Memphis"}}
 
 INCORRECT EXAMPLES (DO NOT USE THESE):
 ❌ <web_search query="weather forecast">
-❌ Let me search for that... {"tool": "web_search"...}
 ❌ {"tool": "web_search"...} [waiting for results]
 
 Remember: Your response must be ONLY the JSON object, nothing else.`;
 
                             // Developer note: The LLM must respond with a single JSON object as above for tool calls.
                             resolve({
-                                descriptions: relevantDescriptions,
+                                descriptions: finalDescriptions,
                                 raw_prompt: rawPrompt,
-                                functions: relevantDescriptions,
-                                system_message: `You are a helpful assistant with access to the following tools:
-
-${relevantDescriptions.map(tool => {
-    let prompt = `Tool: ${tool.name}
-Description: ${tool.description}
-Parameters:`;
-    if (tool.parameters) {
-        Object.entries(tool.parameters).forEach(([name, param]) => {
-            prompt += `\n  - ${name}: ${param.description}`;
-            if (param.enum) {
-                prompt += `\n    Allowed values: ${param.enum.join(', ')}`;
-            }
-        });
-    }
-    return prompt;
-}).join('\n\n')}
-
-CRITICAL INSTRUCTIONS FOR TOOL USAGE:
-1. You MUST respond with ONLY a JSON object when using a tool. No other text, no XML, no explanations.
-2. The JSON object MUST follow this EXACT format:
-   {"tool": "tool_name", "arguments": {"param1": "value1", ...}}
-3. DO NOT use XML tags like <web_search> or any other format
-4. DO NOT include any text before or after the JSON object
-5. DO NOT include your thoughts or reasoning
-6. DO NOT include placeholders or waiting messages
-7. If no tool is needed, respond conversationally
-
-CORRECT EXAMPLE:
-{"tool": "web_search", "arguments": {"query": "weather forecast Memphis"}}
-
-INCORRECT EXAMPLES (DO NOT USE THESE):
-❌ <web_search query="weather forecast">
-❌ Let me search for that... {"tool": "web_search"...}
-❌ {"tool": "web_search"...} [waiting for results]
-
-Remember: Your response must be ONLY the JSON object, nothing else.`
+                                functions: finalDescriptions,
+                                system_message: rawPrompt
                             });
                         } catch (e) {
                             log(`Error parsing search response: ${e.message}`);

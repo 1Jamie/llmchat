@@ -39,8 +39,9 @@ class FileOperationsTool extends BaseTool {
     _init() {
         super._init({
             name: 'file_operations',
-            description: 'Perform file and directory operations using safe console commands. Only files and directories within your home directory (~/) are allowed. Use relative paths starting with ~/ (e.g., ~/Documents) to access files and folders. Absolute or system paths are not permitted. Example: {"tool": "file_operations", "arguments": {"action": "list", "path": "~/Documents"}}. Supports listing, reading, writing, copying, moving, deleting, searching, and more.',
+            description: 'Perform file and directory operations safely within your home directory. Use this tool when you need to: read file contents, write or modify files, create new files or directories, list directory contents, search for files, copy or move files, or manage file permissions. All operations are restricted to your home directory (~/) for security. Use relative paths starting with ~/ (e.g., ~/Documents) to access files and folders. This tool is ideal for file management tasks, content editing, and file organization.',
             category: 'system',
+            keywords: ['file', 'directory', 'folder', 'read', 'write', 'create', 'delete', 'copy', 'move', 'search', 'find', 'list', 'permission', 'chmod', 'chown', 'archive', 'extract', 'path'],
             parameters: {
                 action: {
                     type: 'string',

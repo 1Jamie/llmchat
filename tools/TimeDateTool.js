@@ -10,8 +10,9 @@ class TimeDateTool extends BaseTool {
     _init() {
         super._init({
             name: 'time_date',
-            description: 'Get current time, date, and timezone information',
+            description: 'Get current time, date, and timezone information. Use this tool when you need to: check the current time, get today\'s date, verify the timezone, or get time-related information. This tool provides accurate system time information and is useful for time-sensitive operations, scheduling, or when you need to reference the current time or date in your responses.',
             category: 'system',
+            keywords: ['time', 'date', 'clock', 'calendar', 'timezone', 'hour', 'minute', 'second', 'day', 'month', 'year', 'current', 'now', 'today', 'schedule', 'timestamp'],
             parameters: {
                 action: {
                     type: 'string',

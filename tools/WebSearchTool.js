@@ -15,8 +15,9 @@ var Tool = GObject.registerClass(
         _init() {
             super._init({
                 name: 'web_search',
-                description: 'Search the web for information and return formatted results. Use this tool for: 1) Initial web searches, 2) Finding relevant URLs. For detailed content from URLs, use fetch_web_content tool instead.',
+                description: 'Search the web for information. Use this tool when you need to: look up current events, get weather information, find definitions, check facts, or get up-to-date information from the internet. This tool is essential for queries about weather, news, sports, or any information that requires current web data.',
                 category: 'web',
+                keywords: ['search', 'lookup', 'find', 'information', 'news', 'current', 'latest', 'update', 'weather', 'forecast', 'temperature', 'definition', 'meaning', 'fact', 'check', 'verify', 'research', 'investigate', 'discover', 'explore', 'query', 'results', 'data', 'content', 'web', 'internet', 'online', 'browse', 'google', 'brave', 'search engine'],
                 parameters: {
                     query: {
                         type: 'string',

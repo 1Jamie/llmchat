@@ -105,12 +105,46 @@ The extension includes a robust memory system for persistent storage and retriev
 - Context-aware responses
 - Memory search capabilities
 - Efficient vector similarity search
+- Autonomous memory creation by the LLM
+- Context token management for conversation history
 
 #### Implementation
 - Local Qdrant server for vector storage
 - Sentence transformers for embeddings
 - Automatic persistence management
 - Tool system integration
+- LLM-driven memory creation
+- Configurable context window size
+
+#### Memory Creation
+The LLM autonomously creates memories based on user interactions:
+- Personal information (name, location, preferences)
+- Important decisions and choices
+- Technical configurations
+- User preferences and settings
+- Significant conversation context
+
+The LLM uses a dedicated memory tool to store information:
+```json
+{
+  "tool": "add_memory",
+  "arguments": {
+    "text": "Memory content",
+    "context": {
+      "type": "memory_type",
+      "importance": "high/normal/low",
+      "tags": ["relevant", "tags"]
+    }
+  }
+}
+```
+
+#### Context Management
+- Configurable maximum context tokens (default: 2000)
+- Smart conversation history pruning
+- Priority-based message retention
+- Automatic context summarization
+- Memory-based context enhancement
 
 #### Directory Structure
 ```

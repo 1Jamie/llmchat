@@ -12,8 +12,9 @@ class DisplayManagementTool extends BaseTool {
     _init() {
         super._init({
             name: 'display_management',
-            description: 'Get display information and manage display settings using modern GNOME Shell APIs',
+            description: 'Get information about and manage display settings. Use this tool when you need to: check connected monitors, get display resolutions, verify primary display settings, or get information about multi-monitor setups. This tool provides detailed information about your display configuration and is useful for tasks involving screen management, display settings, or when you need to know about the physical display setup.',
             category: 'system',
+            keywords: ['display', 'monitor', 'screen', 'resolution', 'primary', 'secondary', 'multi', 'setup', 'configuration', 'arrange', 'layout', 'position', 'size', 'dimension', 'physical'],
             parameters: {
                 action: {
                     type: 'string',

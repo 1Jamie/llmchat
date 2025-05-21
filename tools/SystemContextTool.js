@@ -10,8 +10,9 @@ class SystemContextTool extends BaseTool {
     _init() {
         super._init({
             name: 'system_context',
-            description: 'Get system-level information ONLY (windows, workspaces, system info, process monitoring). DO NOT use for web content or user queries.',
+            description: 'Get detailed information about the current system state, including active windows, workspaces, system resources, and running processes. Use this tool when you need to: check what applications are running, monitor system resource usage, get information about open windows, check workspace status, or get clipboard/selection content. This tool provides real-time system information and should be used for queries about the current state of the computer, not for web content or general user queries.',
             category: 'system',
+            keywords: ['system', 'process', 'cpu', 'memory', 'resource', 'usage', 'running', 'active', 'window', 'workspace', 'clipboard', 'selection', 'monitor', 'status', 'state', 'info', 'information'],
             parameters: {
                 type: {
                     type: 'string',

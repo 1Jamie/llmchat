@@ -11,8 +11,9 @@ class ApplicationManagementTool extends BaseTool {
     _init() {
         super._init({
             name: 'application_management',
-            description: 'Launch and manage applications, list installed and running applications with enhanced formatting',
+            description: 'Launch and manage applications on your system. Use this tool when you need to: start a new application, check what applications are currently running, list all installed applications, or get information about application status. This tool can launch applications by name, list running applications with active windows, and provide detailed information about installed software. Use it for any task involving application control or information.',
             category: 'application',
+            keywords: ['app', 'application', 'program', 'software', 'launch', 'start', 'run', 'open', 'install', 'installed', 'running', 'list', 'status', 'info', 'information', 'control', 'manage'],
             parameters: {
                 action: {
                     type: 'string',

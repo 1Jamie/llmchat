@@ -12,6 +12,7 @@ class WorkspaceManagementTool extends BaseTool {
             name: 'workspace_management',
             description: 'Manage workspaces including switching, creating, and removing. Provides detailed application information per workspace.',
             category: 'workspace',
+            keywords: ['workspace', 'desktop', 'switch', 'create', 'remove', 'delete', 'list', 'move', 'window', 'app', 'application', 'organize', 'arrange', 'layout', 'space', 'virtual'],
             parameters: {
                 action: {
                     type: 'string',

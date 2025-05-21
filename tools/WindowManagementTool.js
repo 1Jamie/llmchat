@@ -11,8 +11,9 @@ class WindowManagementTool extends BaseTool {
     _init() {
         super._init({
             name: 'window_management',
-            description: 'Advanced window management including content-based organization, multiple layout options, and workspace integration. For any action that targets a specific window (such as move, resize, close, etc.), you MUST provide the window_id from the get_window_layout tool.',
+            description: 'Manage and control application windows on your desktop. Use this tool when you need to: arrange windows in specific layouts (grid, side-by-side, etc.), move windows between workspaces, resize windows, maximize/minimize windows, or organize windows based on content type. This tool can handle complex window arrangements, save and restore window layouts, and apply window rules. Use it for any task involving window positioning, sizing, or organization.',
             category: 'window',
+            keywords: ['window', 'arrange', 'layout', 'grid', 'tile', 'maximize', 'minimize', 'resize', 'move', 'position', 'organize', 'workspace', 'monitor', 'screen', 'display', 'focus', 'switch'],
             parameters: {
                 action: {
                     type: 'string',
