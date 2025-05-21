@@ -204,8 +204,8 @@ The extension includes a Python-based Qdrant service that provides vector storag
 1. Install the extension:
    ```bash
    git clone https://github.com/yourusername/llmchat.git
-   cd llmchat
-   make install
+   cp llmchat ~/.local/share/gnome-shell/extensions/llmchat@charja113.gmail.com/
+
    ```
 
 2. Install Python dependencies:
