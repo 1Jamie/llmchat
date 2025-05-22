@@ -44,6 +44,7 @@ A seamless integration of AI into your GNOME desktop environment. Chat naturally
   - Settings panel
   - Session management
   - Chat persistence
+  - Session search
 
 ## Architecture
 
@@ -76,7 +77,7 @@ The extension follows a structured process flow when handling user interactions:
 5. **Response Generation**
    - Tool result incorporation
    - Response formatting
-   - Markdown processing
+   - Markdown processing(maybe... planned at least)
 
 6. **Memory Storage**
    - Conversation indexing
@@ -143,7 +144,6 @@ The LLM uses a dedicated memory tool to store information:
 - Configurable maximum context tokens (default: 2000)
 - Smart conversation history pruning
 - Priority-based message retention
-- Automatic context summarization
 - Memory-based context enhancement
 
 #### Directory Structure
@@ -259,8 +259,11 @@ The extension can be configured through the GNOME Extensions app:
 2. Find "LLM Chat"
 3. Click the settings icon
 4. Configure:
+   - Context length
    - AI Provider settings
+   - Reindex session search
    - Model selection
+   - Logging level
    - Temperature
    - Memory settings
    - Tool preferences
@@ -282,18 +285,13 @@ The extension can be configured through the GNOME Extensions app:
 ### Prerequisites
 - GNOME Shell development environment
 - Python 3.6+
-- Node.js and npm
-- Make
+### Python Requirements
+- Sentence Transformers
+- qdrant-client
+- Flask
+- Torch
 
-### Building
-```bash
-make build
-```
 
-### Testing
-```bash
-make test
-```
 
 ## Troubleshooting
 
@@ -320,20 +318,5 @@ Logs are stored in:
 ```
 ~/.local/share/gnome-shell/extensions/llmchat@charja113.gmail.com/logs/
 ```
-
-## Testing
-
-The extension includes automated tests:
-
-```bash
-# Run all tests
-make test
-
-# Run specific test suite
-make test-unit
-make test-integration
-```
-
-## License
 
 This project is licensed under the MIT License - see the LICENSE file for details.
