@@ -87,9 +87,12 @@
 
 /* Thinking message: subtle blue, italic */
 .llm-chat-thinking-message {
-  background-color: rgba(53, 132, 228, 0.1);
-  color: #666666;
+  background-color: #3a3a3a;
+  color: #cccccc;
   font-style: italic;
+  padding: 8px;
+  border-radius: 8px;
+  margin: 4px 0;
 }
 
 /* Message content: always readable */
@@ -108,6 +111,10 @@
   padding: 5px;
   background-color: rgba(60, 60, 60, 0.8);
   border-radius: 4px;
+  flex-shrink: 0;
+  z-index: 2;
+  display: flex;
+  flex-direction: column;
 }
 
 /* Input area: dark background, white text, subtle border */
@@ -251,6 +258,32 @@
 }
 
 /* Session History Styles */
+.session-history-container {
+    padding: 0px 8px 8px 8px;
+    overflow-y: auto;
+    flex: 1;
+    display: flex;
+    flex-direction: column;
+}
+
+.session-history-scrollview {
+    flex: 1;
+    overflow-y: auto;
+    margin-bottom: 10px;
+}
+
+.session-history-header {
+    padding: 12px;
+    background-color: rgba(0, 0, 0, 0.1);
+    border-bottom: 1px solid rgba(255, 255, 255, 0.1);
+    position: sticky;
+    top: 0;
+    z-index: 1;
+    flex-shrink: 0;
+    display: flex;
+    align-items: center;
+}
+
 .session-history-header-box {
   padding: 12px;
   background-color: rgba(0, 0, 0, 0.1);
@@ -403,4 +436,71 @@
   font-size: 0.95em;
   margin: 4px 0 0 0;
   font-style: italic;
+}
+
+.session-history-search {
+    margin-left: 12px;
+    min-width: 200px;
+    padding: 8px 12px;
+    border-radius: 6px;
+    background-color: rgba(255, 255, 255, 0.1);
+    color: #fff;
+    border: 1px solid rgba(255, 255, 255, 0.2);
+    font-size: 0.95em;
+}
+
+.session-history-search:focus {
+    background-color: rgba(255, 255, 255, 0.15);
+    border-color: rgba(255, 255, 255, 0.3);
+    box-shadow: 0 0 0 2px rgba(53, 132, 228, 0.3);
+}
+
+.session-history-search::placeholder {
+    color: rgba(255, 255, 255, 0.5);
+}
+
+.llm-chat-message-links {
+    margin-top: 8px;
+    padding: 4px;
+    border-top: 1px solid rgba(255, 255, 255, 0.1);
+}
+
+.llm-chat-link-button {
+    margin-right: 8px;
+    padding: 4px 8px;
+    border-radius: 4px;
+    background-color: rgba(255, 255, 255, 0.1);
+    color: #ffffff;
+    font-size: 12px;
+    transition: background-color 0.2s ease;
+}
+
+.llm-chat-link-button:hover {
+    background-color: rgba(255, 255, 255, 0.2);
+}
+
+.llm-chat-link-button:active {
+    background-color: rgba(255, 255, 255, 0.3);
+}
+
+/* Add flex properties to the main history container */
+.llm-chat-box StBoxLayout.llm-chat-box {
+    display: flex;
+    flex-direction: column;
+}
+
+.llm-chat-box StBoxLayout.llm-chat-box > StBoxLayout:first-child { /* _chatContainer */
+    flex: 1; /* Chat container takes available space */
+    display: flex;
+    flex-direction: column;
+}
+
+.llm-chat-box StBoxLayout.llm-chat-box > StBoxLayout:nth-child(2) { /* _historyContainer */
+    flex: 1; /* History container takes available space */
+    display: flex;
+    flex-direction: column; /* Arrange history header, scrollview, and input vertically */
+}
+
+.llm-chat-box > StBoxLayout.llm-chat-input-box { /* Ensure the input box is a direct child for flex purposes */
+    /* No changes needed here, already defined above */
 }

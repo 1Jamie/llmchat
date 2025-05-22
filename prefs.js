@@ -60,6 +60,35 @@ function fillPreferencesWindow(window) {
         title: 'Common Settings'
     });
 
+    // Memory settings group
+    const memoryGroup = new Adw.PreferencesGroup({
+        title: 'Memory Settings',
+        description: 'Configure memory and search settings'
+    });
+    page.add(memoryGroup);
+
+    // Reindex Toggle
+    const reindexRow = new Adw.ActionRow({
+        title: 'Reindex Chat History',
+        subtitle: 'When enabled, triggers a full reindex of all chat history and search data'
+    });
+    memoryGroup.add(reindexRow);
+
+    const reindexToggle = new Gtk.Switch({
+        active: settings.get_boolean('trigger-reindex'),
+        valign: Gtk.Align.CENTER
+    });
+    reindexRow.add_suffix(reindexToggle);
+    reindexRow.activatable_widget = reindexToggle;
+
+    // Connect the toggle to the setting
+    settings.bind(
+        'trigger-reindex',
+        reindexToggle,
+        'active',
+        Gio.SettingsBindFlags.DEFAULT
+    );
+
     // OpenAI API Key entry
     const openaiBox = new Adw.ActionRow({
         title: 'OpenAI API Key'
@@ -245,15 +274,15 @@ function fillPreferencesWindow(window) {
     // Max context tokens (common setting)
     const maxContextTokensRow = new Adw.ActionRow({
         title: 'Max Context Tokens',
-        subtitle: 'Maximum tokens of chat history/context sent to the LLM (higher = more context, lower = faster)'
+        subtitle: 'Maximum tokens of chat history/context sent to the LLM. Auto-limited by provider capabilities: OpenAI (8k), Anthropic (100k), Gemini (30k), Local (4k)'
     });
     const maxContextTokensScale = new Gtk.Scale({
         orientation: Gtk.Orientation.HORIZONTAL,
         adjustment: new Gtk.Adjustment({
             lower: 500,
-            upper: 8000,
-            step_increment: 100,
-            page_increment: 500,
+            upper: 50000,  // Increased to support large context windows
+            step_increment: 500,
+            page_increment: 2000,
             value: settings.get_int('max-context-tokens') || 2000
         }),
         digits: 0,
@@ -325,6 +354,43 @@ function fillPreferencesWindow(window) {
     hideThinkingRow.add_suffix(hideThinkingSwitch);
     commonSettings.add(hideThinkingRow);
 
+    // Logging level dropdown
+    const logLevels = [
+        { id: 'error', name: 'Error (Minimal)' },
+        { id: 'warn', name: 'Warning (Errors + Warnings)' },
+        { id: 'info', name: 'Info (Standard)' },
+        { id: 'debug', name: 'Debug (Verbose)' }
+    ];
+
+    const logLevelRow = new Adw.ComboRow({
+        title: 'Logging Level',
+        subtitle: 'Controls the verbosity of extension logging output'
+    });
+
+    // Create a string list store for the logging dropdown
+    const logLevelModel = new Gtk.StringList();
+    logLevels.forEach(level => {
+        logLevelModel.append(level.name);
+    });
+
+    logLevelRow.set_model(logLevelModel);
+    
+    // Set the active item based on current settings
+    const currentLogLevel = settings.get_string('log-level');
+    const currentLogIndex = logLevels.findIndex(level => level.id === currentLogLevel);
+    logLevelRow.set_selected(currentLogIndex >= 0 ? currentLogIndex : 2); // Default to 'info'
+
+    // Connect the logging level selection to update settings
+    logLevelRow.connect('notify::selected', widget => {
+        const selected = widget.get_selected();
+        if (selected >= 0 && selected < logLevels.length) {
+            const levelId = logLevels[selected].id;
+            settings.set_string('log-level', levelId);
+        }
+    });
+
+    commonSettings.add(logLevelRow);
+
     // Function to update visible settings
     function updateVisibleSettings(providerId) {
         // Remove all provider settings groups
@@ -358,8 +424,11 @@ function fillPreferencesWindow(window) {
     // Add the service provider row to the API group
     apiGroup.add(serviceProviderRow);
 
-    // Add the API group to the page
+    // Add all groups to the page
     page.add(apiGroup);
+    page.add(memoryGroup);
+    Object.values(providerSettings).forEach(group => page.add(group));
+    page.add(commonSettings);
 
     // Initial setup of visible settings
     updateVisibleSettings(currentProvider);

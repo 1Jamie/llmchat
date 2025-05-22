@@ -11,7 +11,7 @@ class WindowLayoutTool extends BaseTool {
     _init() {
         super._init({
             name: 'get_window_layout',
-            description: 'Get detailed information about the current window layout across all workspaces and monitors',
+            description: 'Get window layout information across workspaces and monitors.',
             category: 'window',
             parameters: {
                 include_minimized: {

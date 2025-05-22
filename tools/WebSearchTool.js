@@ -15,7 +15,7 @@ var Tool = GObject.registerClass(
         _init() {
             super._init({
                 name: 'web_search',
-                description: 'Search the web for information. Use this tool when you need to: look up current events, get weather information, find definitions, check facts, or get up-to-date information from the internet. This tool is essential for queries about weather, news, sports, or any information that requires current web data.',
+                description: 'Search the web for current information. Use for weather, news, sports, or any up-to-date web data.',
                 category: 'web',
                 keywords: ['search', 'lookup', 'find', 'information', 'news', 'current', 'latest', 'update', 'weather', 'forecast', 'temperature', 'definition', 'meaning', 'fact', 'check', 'verify', 'research', 'investigate', 'discover', 'explore', 'query', 'results', 'data', 'content', 'web', 'internet', 'online', 'browse', 'google', 'brave', 'search engine'],
                 parameters: {
@@ -31,16 +31,36 @@ var Tool = GObject.registerClass(
             this._lastSearchResults = null;
             this._lastSearchContext = null;
 
-            // Log initialization with capabilities and usage guidelines
-            log('WebSearchTool initialized with the following capabilities:');
-            log('1. Web search using Brave Search API');
-            log('2. Result formatting with clickable URLs');
-            log('3. Source attribution and cache links');
-            log('\nUSAGE GUIDELINES:');
-            log('- Use for initial web searches and finding relevant URLs');
-            log('- Results include clickable URLs and cache links');
-            log('- For detailed content from URLs, use fetch_web_content tool');
-            log('- Maintains conversation history for context');
+            // Simplified initialization logging
+            log('[WebSearch] Tool initialized with Brave Search API support');
+        }
+
+        // Helper function to strip HTML tags and markdown formatting
+        _stripHtmlAndMarkdown(text) {
+            if (!text) return '';
+            
+            // Remove HTML tags
+            let cleaned = text.replace(/<[^>]*>/g, '');
+            
+            // Remove common markdown formatting
+            cleaned = cleaned.replace(/\*\*([^*]+)\*\*/g, '$1'); // Bold
+            cleaned = cleaned.replace(/\*([^*]+)\*/g, '$1'); // Italic
+            cleaned = cleaned.replace(/`([^`]+)`/g, '$1'); // Inline code
+            cleaned = cleaned.replace(/```[\s\S]*?```/g, ''); // Code blocks
+            cleaned = cleaned.replace(/\[([^\]]+)\]\([^)]+\)/g, '$1'); // Links
+            cleaned = cleaned.replace(/#{1,6}\s+(.+)/g, '$1'); // Headers
+            cleaned = cleaned.replace(/>\s+(.+)/g, '$1'); // Blockquotes
+            
+            // Remove extra whitespace and clean up
+            cleaned = cleaned.replace(/\s+/g, ' ').trim();
+            cleaned = cleaned.replace(/&nbsp;/g, ' ');
+            cleaned = cleaned.replace(/&amp;/g, '&');
+            cleaned = cleaned.replace(/&lt;/g, '<');
+            cleaned = cleaned.replace(/&gt;/g, '>');
+            cleaned = cleaned.replace(/&quot;/g, '"');
+            cleaned = cleaned.replace(/&#39;/g, "'");
+            
+            return cleaned;
         }
 
         execute(params = {}) {
@@ -63,26 +83,30 @@ var Tool = GObject.registerClass(
         searchWeb(query) {
             return new Promise((resolve, reject) => {
                 try {
-                    log(`Searching web for: ${query}`);
+                    // Consolidate search logging to reduce spam
+            if (!this._searchCount) this._searchCount = 0;
+            this._searchCount++;
+            
+            if (this._searchCount === 1 || this._searchCount % 5 === 0) {
+                log(`[WebSearch ${this._searchCount}] Searching for: "${query}"`);
+            }
 
-                    // Get the Brave Search API key from settings
-                    const settings = ExtensionUtils.getSettings('org.gnome.shell.extensions.llmchat');
-                    const apiKey = settings.get_string('brave-search-api-key');
-                    
-                    if (!apiKey) {
-                        reject('Brave Search API key is not set. Please set it in the extension settings.');
-                        return;
-                    }
+            // Get the Brave Search API key from settings
+            const settings = ExtensionUtils.getSettings('org.gnome.shell.extensions.llmchat');
+            const apiKey = settings.get_string('brave-search-api-key');
+            
+            if (!apiKey) {
+                reject('Brave Search API key is not set. Please set it in the extension settings.');
+                return;
+            }
 
-                    // Create the search request
-                    const message = Soup.Message.new('GET', `https://api.search.brave.com/res/v1/web/search?q=${encodeURIComponent(query)}`);
+            // Create the search request
+            const message = Soup.Message.new('GET', `https://api.search.brave.com/res/v1/web/search?q=${encodeURIComponent(query)}`);
 
-                    // Add headers for Brave Search API
-                    message.request_headers.append('Accept', 'application/json');
-                    message.request_headers.append('X-Subscription-Token', apiKey);
-                    message.request_headers.append('User-Agent', 'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/136.0.0.0 Safari/537.36');
-
-                    log('Sending request to Brave Search API...');
+            // Add headers for Brave Search API
+            message.request_headers.append('Accept', 'application/json');
+            message.request_headers.append('X-Subscription-Token', apiKey);
+            message.request_headers.append('User-Agent', 'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/136.0.0.0 Safari/537.36');
 
                             // Store reference to this for use in callback
                             const self = this;
@@ -97,15 +121,14 @@ var Tool = GObject.registerClass(
 
                         try {
                             const response = JSON.parse(msg.response_body.data.toString());
-                            log(`Received response from Brave Search API`);
 
                             // Extract results from the Brave Search API response
                                 const results = [];
                             if (response.web && response.web.results) {
                                 response.web.results.forEach(result => {
                                                 results.push({
-                                        title: result.title,
-                                        content: result.description || '',
+                                        title: self._stripHtmlAndMarkdown(result.title || ''),
+                                        content: self._stripHtmlAndMarkdown(result.description || ''),
                                         url: result.url,
                                         // Add additional metadata for better context
                                         source: result.source || 'Unknown',
@@ -116,7 +139,10 @@ var Tool = GObject.registerClass(
                                 });
                                 }
 
-                                log(`Successfully processed ${results.length} results`);
+                                // Log results only occasionally to reduce spam
+                                if (self._searchCount === 1 || self._searchCount % 5 === 0) {
+                                    log(`[WebSearch] Processed ${results.length} results for query: "${query}"`);
+                                }
 
                                 if (results.length === 0) {
                                     reject("No search results found. Please try a different search query.");

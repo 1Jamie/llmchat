@@ -10,7 +10,7 @@ class AddMemoryTool extends BaseTool {
     _init() {
         super._init({
             name: 'add_memory',
-            description: 'Store important information in the memory system for future reference. Use this tool when you need to: save user preferences, remember personal information, store important decisions, or keep track of significant details. The memory system can store text with optional context metadata (like importance level, tags, or source). This tool is essential for maintaining continuity in conversations and remembering user-specific information. Use it whenever you learn something important about the user or their preferences.',
+            description: 'Store information in memory for future reference. Use for saving preferences, personal info, decisions, or important details. Supports text with optional context metadata.',
             category: 'memory',
             keywords: ['memory', 'remember', 'store', 'save', 'preference', 'information', 'context', 'metadata', 'tag', 'important', 'reference', 'future', 'recall', 'retrieve', 'persist'],
             parameters: {

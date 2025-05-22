@@ -10,7 +10,7 @@ class SystemSettingsTool extends BaseTool {
     _init() {
         super._init({
             name: 'system_settings',
-            description: 'Control system settings: night light mode, screen brightness (0-100), and system volume (0-100). For volume control, use: {"tool": "system_settings", "arguments": {"action": "set_volume", "value": 70}}',
+            description: 'Control system settings: night light mode, screen brightness (0-100), and system volume (0-100).',
             category: 'system',
             keywords: ['settings', 'brightness', 'volume', 'night', 'light', 'mode', 'display', 'screen', 'adjust', 'change', 'toggle', 'system'],
             parameters: {

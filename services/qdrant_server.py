@@ -129,6 +129,8 @@ def load_model():
         # Ensure collections exist
         ensure_collection('memories')
         ensure_collection('tools')
+        ensure_collection('llm_memories')
+        ensure_collection('conversation_history')
         
     except Exception as e:
         logger.error(f"Error loading model: {str(e)}")
@@ -220,69 +222,76 @@ def index_documents():
 
 @app.route('/search', methods=['POST'])
 def search_documents():
+    """Search for relevant documents"""
     try:
         data = request.get_json()
-        if not data:
-            logger.error("No data provided in search request")
-            return jsonify({'error': 'No data provided'}), 400
-
-        query = data.get('query', '')
-        top_k = data.get('top_k', 3)
-        namespaces = data.get('namespaces', ['tools'])
-        min_score = data.get('min_score', 0.1)  # Match embedding service threshold
-
-        logger.info(f"Searching for '{query}' in {namespaces} (top_k={top_k}, min_score={min_score})")
-
-        # Encode the query
-        query_vector = model.encode(query, convert_to_tensor=True, show_progress_bar=False)
-        query_vector = query_vector.cpu().numpy().tolist()
-
-        # Search in each namespace and combine results
-        all_results = []
-        for namespace in namespaces:
-            try:
-                ensure_collection(namespace)
-                
-                search_result = client.search(
-                    collection_name=namespace,
-                    query_vector=query_vector,
-                    limit=top_k,
-                    score_threshold=min_score
-                )
-                
-                logger.debug(f"Found {len(search_result)} results in namespace {namespace}")
-                
-                # Add namespace to each result
-                for result in search_result:
-                    result_dict = {
-                        'id': result.payload.get('original_id', result.id),
-                        'score': result.score,
-                        'text': result.payload.get('text', ''),
-                        'context': result.payload.get('context', {}),
-                        'namespace': namespace
-                    }
-                    all_results.append(result_dict)
-            except Exception as e:
-                logger.error(f"Error searching namespace {namespace}: {str(e)}")
-                logger.error(traceback.format_exc())
-                continue
-
-        # Sort all results by score
-        all_results.sort(key=lambda x: x['score'], reverse=True)
+        logger.info(f"Received search request data: {data}")
         
-        # Take top_k results
-        top_results = all_results[:top_k]
-        logger.info(f"Returning {len(top_results)} results")
+        if not data or 'query' not in data or 'namespace' not in data:
+            logger.error("Missing required fields in search request")
+            return jsonify({
+                'status': 'error',
+                'error': 'Missing required fields: query and namespace',
+                'results': []
+            }), 400
 
-        return jsonify({
-            'query': query,
-            'results': top_results
-        })
+        query = data['query']
+        namespace = data['namespace']
+        top_k = data.get('top_k', 3) # Default to 3
+        min_score = data.get('min_score', 0.1) # Default minimum score
+
+        logger.info(f"Searching for '{query}' in ['{namespace}'] (top_k={top_k}, min_score={min_score})")
+
+        if not model:
+            logger.error("Model not loaded for search")
+            return jsonify({
+                'status': 'error',
+                'error': 'Model not loaded',
+                'results': []
+            }), 503 # Service Unavailable
+
+        # Generate embedding for query
+        query_embedding = model.encode(query, show_progress_bar=False)
+
+        # Search in collection
+        try:
+            results = client.search(
+                collection_name=namespace,
+                query_vector=query_embedding.tolist(),
+                limit=top_k,
+                score_threshold=min_score
+            )
+            
+            # Format results
+            formatted_results = []
+            for result in results:
+                formatted_results.append({
+                    'id': result.payload.get('original_id', str(result.id)),
+                    'text': result.payload.get('text', ''),
+                    'score': result.score,
+                    'context': result.payload.get('context', {})
+                })
+            
+            logger.info(f"Found {len(formatted_results)} results")
+            return jsonify({
+                'status': 'success',
+                'results': formatted_results
+            })
+            
+        except Exception as e:
+            logger.error(f"Error during search: {str(e)}")
+            logger.error(traceback.format_exc())
+            return jsonify({
+                'status': 'error',
+                'error': f'Error during search: {str(e)}',
+                'results': []
+            }), 500
 
     except Exception as e:
-        logger.error(f"Error during search: {str(e)}")
+        logger.error(f"Error in search_documents: {str(e)}")
         logger.error(traceback.format_exc())
         return jsonify({
+            'status': 'error',
             'error': str(e),
             'results': []
         }), 500
@@ -290,19 +299,38 @@ def search_documents():
 @app.route('/health', methods=['GET'])
 def health_check():
     """Health check endpoint"""
-    return jsonify({
-        'status': 'healthy',
-        'model_loaded': model is not None
-    })
+    try:
+        # Ensure collections exist
+        ensure_collection('tools')
+        ensure_collection('memories')
+        ensure_collection('llm_memories')
+        ensure_collection('conversation_history')
+        
+        return jsonify({
+            'status': 'healthy',
+            'model_loaded': model is not None
+        })
+    except Exception as e:
+        logger.error(f"Error in health check: {str(e)}")
+        logger.error(traceback.format_exc())
+        return jsonify({
+            'status': 'error',
+            'error': str(e)
+        }), 500
 
 @app.route('/reset', methods=['POST'])
 def reset_memory():
-    """Reset all namespaces in the vector store"""
+    """Reset all namespaces in the vector store except llm_memories"""
     try:
         # Get all collections
         collections = client.get_collections().collections
         for collection in collections:
             collection_name = collection.name
+            # Skip llm_memories namespace
+            if collection_name == 'llm_memories':
+                logger.info("Preserving llm_memories namespace")
+                continue
+                
             # Delete all points in the collection
             client.delete(collection_name=collection_name, points_selector=models.FilterSelector(
                 filter=models.Filter(
@@ -314,9 +342,11 @@ def reset_memory():
                     ]
                 )
             ))
+            logger.info(f"Cleared namespace: {collection_name}")
+            
         return jsonify({
             'status': 'success',
-            'message': 'All namespaces cleared successfully'
+            'message': 'All namespaces cleared successfully (llm_memories preserved)'
         })
     except Exception as e:
         logger.error(f"Error resetting memory: {str(e)}")
@@ -341,9 +371,14 @@ def clear_namespace():
             # Delete the collection
             client.delete_collection(namespace)
             logger.info(f"Cleared namespace: {namespace}")
+            
+            # Recreate the collection
+            ensure_collection(namespace)
+            logger.info(f"Recreated namespace: {namespace}")
+            
             return jsonify({
                 'status': 'success',
-                'message': f'Cleared namespace {namespace}'
+                'message': f'Cleared and recreated namespace {namespace}'
             })
         except Exception as e:
             logger.error(f"Error clearing namespace {namespace}: {str(e)}")

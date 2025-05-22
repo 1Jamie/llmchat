@@ -1,20 +1,19 @@
 /* extension.js
 */
 
-const { Clutter, Gio, GLib, GObject, Pango, St, Shell } = imports.gi;
-const Soup = imports.gi.Soup;
-
+const { Clutter, Gio, GLib, GObject, Pango, St, Shell, Soup } = imports.gi;
 const Main = imports.ui.main;
 const PanelMenu = imports.ui.panelMenu;
 const PopupMenu = imports.ui.popupMenu;
 const ExtensionUtils = imports.misc.extensionUtils;
 const Me = ExtensionUtils.getCurrentExtension();
-const Signals = imports.signals;
-
-// Import tool system
+const { Logger } = Me.imports.utils.Logger;
+const { debug, info, warn, error } = Logger;
 const { ToolLoader } = Me.imports.utils.ToolLoader;
-// Import our new MemoryService
 const { MemoryService } = Me.imports.services.MemoryService;
+const { PromptAssembler } = Me.imports.utils.PromptAssembler;
+
+const Signals = imports.signals;
 
 // Import session management
 const { SessionManager } = Me.imports.sessionManager;
@@ -46,18 +45,10 @@ toolLoader.loadTools();
 
 // Provider Adapter class to handle different AI providers
 class ProviderAdapter {
-    constructor(settings) {
+    constructor(settings, chatBox = null) {
         this._settings = settings;
-        this._initialized = false;
-        this._initializationPromise = null;
-        
-        // Initialize the memory system asynchronously
-        GLib.timeout_add(GLib.PRIORITY_DEFAULT, 0, () => {
-            this._initializeMemorySystem().catch(e => {
-                log(`Error initializing memory system: ${e.message}`);
-            });
-            return GLib.SOURCE_REMOVE;
-        });
+        this._chatBox = chatBox;
+        this._promptAssembler = new PromptAssembler(settings);
     }
     
     async _initializeMemorySystem() {
@@ -98,7 +89,12 @@ class ProviderAdapter {
         }
 
         const provider = this._settings.get_string('service-provider');
-        log(`Making request to provider: ${provider}`);
+        // Only log provider requests occasionally to reduce spam
+        if (!this._requestCount) this._requestCount = 0;
+        this._requestCount++;
+        if (this._requestCount === 1 || this._requestCount % 10 === 0) {
+            log(`[Request ${this._requestCount}] Using provider: ${provider}`);
+        }
         
         try {
             // Extract just the user's query from the conversation history
@@ -112,15 +108,19 @@ class ProviderAdapter {
                     // Step 1: Get relevant tools
                     const relevantTools = await memoryService.getRelevantToolDescriptions(userQuery);
                     relevantToolsPrompt = relevantTools; // Pass the entire result object
-                    toolCalls = relevantTools.tools; // Use the tools array for function calls
+                    toolCalls = relevantTools.functions; // Use the functions array for function calls
                     
-                    // Step 2: Get relevant memories
-                    relevantMemories = await memoryService.getRelevantMemories(userQuery);
+                    // Step 2: Get relevant LLM memories only (not conversation history)
+                    const llmMemories = await memoryService._getLLMMemories(userQuery, 3);
                     
-                    // Step 3: Add memories to the conversation context
-                    if (relevantMemories.length > 0) {
-                        const memoryContext = this._formatMemoryContext(relevantMemories);
-                        text = `${text}\n\nRelevant context from previous conversations:\n${memoryContext}`;
+                    // Step 3: Filter and categorize LLM memories by freshness
+                    if (llmMemories.length > 0) {
+                        const { validMemories, expiredMemories } = this._categorizeMemoriesByFreshness(llmMemories);
+                        
+                        if (validMemories.length > 0 || expiredMemories.length > 0) {
+                            const memoryContext = this._formatMemoryContext([...validMemories, ...expiredMemories]);
+                            text = `${text}\n\nRelevant memories from previous conversations:\n${memoryContext}`;
+                        }
                     }
                 } catch (e) {
                     log(`Error retrieving relevant tools or memories: ${e.message}`);
@@ -131,19 +131,19 @@ class ProviderAdapter {
             let response;
             switch (provider) {
                 case 'openai':
-                    response = await this._makeOpenAIRequest(text, toolCalls, relevantToolsPrompt);
+                    response = await this._makeOpenAIRequest(text, toolCalls, relevantToolsPrompt, this._chatBox);
                     break;
                 case 'gemini':
-                    response = await this._makeGeminiRequest(text, toolCalls, relevantToolsPrompt);
+                    response = await this._makeGeminiRequest(text, toolCalls, relevantToolsPrompt, this._chatBox);
                     break;
                 case 'anthropic':
-                    response = await this._makeAnthropicRequest(text, toolCalls, relevantToolsPrompt);
+                    response = await this._makeAnthropicRequest(text, toolCalls, relevantToolsPrompt, this._chatBox);
                     break;
                 case 'llama':
-                    response = await this._makeLlamaRequest(text, toolCalls, relevantToolsPrompt);
+                    response = await this._makeLlamaRequest(text, toolCalls, relevantToolsPrompt, this._chatBox);
                     break;
                 case 'ollama':
-                    response = await this._makeOllamaRequest(text, toolCalls, relevantToolsPrompt);
+                    response = await this._makeOllamaRequest(text, toolCalls, relevantToolsPrompt, this._chatBox);
                     break;
                 default:
                     throw new Error(`Unknown provider: ${provider}`);
@@ -157,122 +157,212 @@ class ProviderAdapter {
         }
     }
 
+    _categorizeMemoriesByFreshness(memories) {
+        const currentTime = new Date();
+        const validMemories = [];
+        const expiredMemories = [];
+        
+        memories.forEach(memory => {
+            if (memory.context?.is_volatile && memory.context?.expires_at) {
+                const expiresDate = new Date(memory.context.expires_at);
+                if (currentTime > expiresDate) {
+                    expiredMemories.push(memory);
+                } else {
+                    validMemories.push(memory);
+                }
+            } else {
+                // Non-volatile memories are always valid
+                validMemories.push(memory);
+            }
+        });
+        
+        return { validMemories, expiredMemories };
+    }
+
     _formatMemoryContext(memories) {
-        return memories.map(memory => {
-            let context = `Memory: ${memory.text}\n`;
+        const currentTime = new Date();
+        
+        log(`[Memory] Formatting ${memories.length} memories for context`);
+        
+        return memories.map((memory, index) => {
+            let context = `MEMORY #${index+1}:\n${memory.text}\n`;
             
-            // Add relevance score if available
+            // Add relevance score if available with clear formatting
             if (memory.relevance) {
-                context += `Relevance: ${Math.round(memory.relevance * 100)}%\n`;
+                const relevancePercent = Math.round(memory.relevance * 100);
+                context += `RELEVANCE: ${relevancePercent}% ${
+                    relevancePercent > 90 ? '(HIGHLY RELEVANT)' : 
+                    relevancePercent > 70 ? '(RELEVANT)' : 
+                    relevancePercent > 50 ? '(SOMEWHAT RELEVANT)' : '(LOW RELEVANCE)'
+                }\n`;
             }
             
-            // Add timestamp if available
-            if (memory.context?.timestamp) {
-                const date = new Date(memory.context.timestamp);
-                context += `Time: ${date.toLocaleString()}\n`;
+            // Add creation timestamp and current time for comparison
+            if (memory.context?.created_at || memory.context?.timestamp) {
+                const createdDate = new Date(memory.context.created_at || memory.context.timestamp);
+                const ageInHours = Math.round((currentTime - createdDate) / (1000 * 60 * 60));
+                const ageInDays = Math.round(ageInHours / 24);
+                
+                context += `CREATED: ${createdDate.toLocaleString()}\n`;
+                context += `AGE: ${ageInDays > 0 ? `${ageInDays} days` : `${ageInHours} hours`} ago\n`;
+                context += `CURRENT TIME: ${currentTime.toLocaleString()}\n`;
             }
             
-            // Add importance if available
-            if (memory.context?.metadata?.importance) {
-                context += `Importance: ${memory.context.metadata.importance}\n`;
+            // Add expiration information for volatile data with clear formatting
+            if (memory.context?.is_volatile && memory.context?.expires_at) {
+                const expiresDate = new Date(memory.context.expires_at);
+                const isExpired = currentTime > expiresDate;
+                const timeToExpiry = Math.round((expiresDate - currentTime) / (1000 * 60 * 60));
+                
+                context += `TYPE: 🕒 VOLATILE DATA\n`;
+                if (isExpired) {
+                    context += `STATUS: ⚠️ EXPIRED (${Math.abs(timeToExpiry)} hours ago) - YOU SHOULD REFRESH THIS INFORMATION\n`;
+                } else {
+                    context += `EXPIRES: ${expiresDate.toLocaleString()} (in ${timeToExpiry} hours)\n`;
+                    context += `STATUS: ✓ VALID (still fresh and usable)\n`;
+                }
+            } else {
+                context += `TYPE: 📌 PERSISTENT DATA (never expires)\n`;
+                context += `STATUS: ✓ ALWAYS VALID\n`;
             }
             
-            // Add tags if available
-            if (memory.context?.metadata?.tags?.length > 0) {
-                context += `Tags: ${memory.context.metadata.tags.join(', ')}\n`;
+            // Add importance if available with clear formatting
+            if (memory.context?.importance) {
+                context += `IMPORTANCE: ${memory.context.importance.toUpperCase()}\n`;
+            }
+            
+            // Add tags if available with clear formatting
+            if (memory.context?.tags?.length > 0) {
+                context += `TAGS: ${memory.context.tags.join(', ')}\n`;
+            }
+            
+            // Add source if available
+            if (memory.context?.source) {
+                context += `SOURCE: ${memory.context.source}\n`;
+            }
+            
+            // Add instructions for the LLM
+            if (memory.context?.is_volatile && currentTime > new Date(memory.context.expires_at)) {
+                context += `\n⚠️ NOTE: This information is EXPIRED. You should inform the user and get fresh data if needed.\n`;
             }
             
             return context;
-        }).join('\n');
+        }).join('\n\n----------\n\n');
     }
 
     _determineMemoryImportance(query, response) {
         const text = `${query} ${response}`.toLowerCase();
         
-        // Patterns for volatile/temporary information that should not be stored
+        // Patterns for volatile/temporary information that should not be stored long-term
         const volatilePatterns = [
-            // System state patterns
+            // System state patterns - completely avoid these
             /(?:ip address|directory|current time|current date|system load|memory usage|cpu usage|disk space|process list|running processes)/i,
             /(?:file list|directory contents|folder contents|ls output|dir output)/i,
             /(?:window layout|workspace layout|screen layout|display configuration)/i,
             /(?:current session|active session|user session|login session)/i,
             
-            // Temporary state patterns
-            /(?:currently|now|right now|at the moment|presently|currently running|currently active)/i,
-            /(?:temporary|temporary state|temporary file|temp file|cache|cached)/i,
-            /(?:dynamic|dynamic content|dynamic state|changing|variable)/i,
-            
-            // System command outputs
+            // System command outputs - completely avoid these
             /(?:command output|terminal output|console output|shell output)/i,
             /(?:search results|query results|filtered results|sorted results)/i,
             /(?:error log|system log|application log|debug log)/i,
             
-            // File system operations
+            // File system operations - completely avoid these
             /(?:file operation|directory operation|file system|file listing|directory listing)/i,
             /(?:file content|file contents|file data|file information)/i,
             
-            // Network and connectivity
+            // Network and connectivity - completely avoid these
             /(?:network status|connection status|connectivity|network state)/i,
             /(?:active connection|current connection|network connection)/i,
             
-            // Process and system monitoring
+            // Process and system monitoring - completely avoid these
             /(?:process status|system status|monitoring data|performance data)/i,
             /(?:resource usage|system resources|hardware status)/i
         ];
 
-        // Check for volatile content first
+        // Check for completely volatile content that should never be stored
         for (const pattern of volatilePatterns) {
             if (pattern.test(text)) {
-                log(`Detected volatile content: ${pattern}`);
-                return 'none';
+                log(`Detected non-storable volatile content: ${pattern}`);
+                return { importance: 'none', expiration_hours: null };
             }
         }
 
-        // Patterns for persistent information that should be stored
+        // Patterns for short-term volatile information that should expire quickly
+        const shortTermVolatilePatterns = [
+            // Current activities and temporary states
+            /(?:currently working on|currently debugging|right now|at the moment|today)/i,
+            /(?:temporary|temp|cache|cached|dynamic content)/i,
+            /(?:this session|this conversation|current task)/i,
+            /(?:weather today|current weather|today's weather)/i,
+            /(?:debugging|troubleshooting|investigating)/i,
+            
+            // Daily context
+            /(?:today|this morning|this afternoon|this evening)/i,
+            /(?:daily|daily task|daily routine)/i
+        ];
+
+        // Patterns for medium-term context (weekly/project-based)
+        const mediumTermVolatilePatterns = [
+            /(?:this week|this project|current project|working on project)/i,
+            /(?:weekly|weekly goal|this sprint|current sprint)/i,
+            /(?:learning|studying|course|class)/i,
+            /(?:job search|interview|application)/i
+        ];
+
+        // Patterns for persistent information that should be stored permanently
         const persistentPatterns = [
-            // Personal preferences and settings
+            // Personal preferences and settings - permanent
             /(?:prefer|preference|like|favorite|usually|typically|always|never)/i,
             /(?:setting|configuration|option|choice|decision)/i,
             
-            // Personal identity and location - Enhanced patterns
+            // Personal identity and location - permanent
             /(?:name|email|address|location|city|country|timezone|state|zip|postal code)/i,
             /(?:live in|reside in|located in|based in|living in|from|hometown)/i,
-            /(?:weather|forecast|temperature|conditions|climate)/i,  // Weather-related patterns
             
-            // Important decisions and relationships
+            // Important decisions and relationships - permanent
             /(?:decided to|chose to|selected|picked|opted for)/i,
             /(?:friend|colleague|partner|family|relative)/i,
             
-            // Significant dates and events
+            // Significant dates and events - permanent
             /(?:birthday|anniversary|important date|significant date)/i,
-            /(?:event|occasion|celebration|milestone)/i
+            /(?:event|occasion|celebration|milestone)/i,
+            
+            // Skills and expertise - permanent
+            /(?:skill|expertise|experience|background|profession|job title)/i,
+            /(?:programming language|technology|framework|tool preference)/i
         ];
+
+        // Check for short-term volatile content (24 hours)
+        for (const pattern of shortTermVolatilePatterns) {
+            if (pattern.test(text)) {
+                log(`Detected short-term volatile content: ${pattern}`);
+                return { importance: 'normal', expiration_hours: 24 };
+            }
+        }
+
+        // Check for medium-term volatile content (1 week)
+        for (const pattern of mediumTermVolatilePatterns) {
+            if (pattern.test(text)) {
+                log(`Detected medium-term volatile content: ${pattern}`);
+                return { importance: 'normal', expiration_hours: 168 }; // 1 week
+            }
+        }
 
         // Check for persistent content
         let isPersistent = false;
-        let isLocationInfo = false;
-        
         for (const pattern of persistentPatterns) {
             if (pattern.test(text)) {
                 isPersistent = true;
-                // Check specifically for location patterns
-                if (pattern.toString().includes('location') || 
-                    pattern.toString().includes('live in') || 
-                    pattern.toString().includes('reside in') ||
-                    pattern.toString().includes('weather')) {
-                    isLocationInfo = true;
-                }
                 break;
             }
         }
 
-        // Calculate importance score based on multiple factors
+        if (isPersistent) {
+            // Calculate importance score for persistent content
         let importanceScore = 0;
         
         // Factor 1: Personal Relevance (0-3 points)
-        if (isPersistent) {
             importanceScore += 3;
-        }
         
         // Factor 2: Sentiment Strength (0-2 points)
         const sentimentWords = {
@@ -306,14 +396,16 @@ class ProviderAdapter {
             }
         }
         
-        // Determine final importance based on total score
+            // Determine final importance for persistent content (no expiration)
         if (importanceScore >= 6) {
-            return 'high';
+                return { importance: 'high', expiration_hours: null };
         } else if (importanceScore >= 3) {
-            return 'normal';
+                return { importance: 'normal', expiration_hours: null };
+            }
         }
         
-        return 'none';
+        // Default: don't store if not clearly persistent or temporarily relevant
+        return { importance: 'none', expiration_hours: null };
     }
 
     _extractTags(query, response) {
@@ -375,7 +467,14 @@ class ProviderAdapter {
                             stack--;
                         }
                     }
+                    
+                    // Only increment j if we haven't found the complete JSON object
+                    if (stack > 0) {
                     j++;
+                    } else {
+                        j++; // Include the closing brace
+                        break;
+                    }
                 }
                 
                 if (stack === 0) {
@@ -408,7 +507,8 @@ class ProviderAdapter {
             }
         }
         
-        // Process each unique match
+        // Process each unique match and track positions for precise removal
+        const matchPositions = [];
         for (const { parsed, match } of uniqueMatches) {
             toolCalls.push({
                 function: {
@@ -416,8 +516,22 @@ class ProviderAdapter {
                     arguments: JSON.stringify(parsed.arguments)
                 }
             });
-            remainingText = remainingText.replace(match, '').trim();
+            
+            // Find the position of this match in the original text for precise removal
+            const matchIndex = text.indexOf(match);
+            if (matchIndex !== -1) {
+                matchPositions.push({ start: matchIndex, end: matchIndex + match.length });
+            }
         }
+        
+        // Remove matches from the text by sorting positions in reverse order
+        // and removing from the end to avoid index shifting
+        matchPositions.sort((a, b) => b.start - a.start);
+        remainingText = text;
+        for (const { start, end } of matchPositions) {
+            remainingText = remainingText.slice(0, start) + remainingText.slice(end);
+        }
+        remainingText = remainingText.trim();
         
         log(`Extracted ${toolCalls.length} tool calls from response`);
         return { toolCalls, remainingText };
@@ -505,18 +619,34 @@ class ProviderAdapter {
             if (memoryCommands.length > 0 && memoryService && memoryService._initialized) {
                 memoryCommands.forEach(memory => {
                     try {
-                        memoryService.indexMemory({
-                            text: memory.content,
-                            context: {
+                        const now = new Date();
+                        const context = {
                                 type: memory.type,
                                 importance: memory.importance,
                                 context: memory.context,
                                 tags: memory.tags,
-                                timestamp: new Date().toISOString()
-                            }
+                            timestamp: now.toISOString(),
+                            created_at: now.toISOString()
+                        };
+
+                        // Handle expiration for volatile data
+                        if (memory.expiration_hours && memory.expiration_hours > 0) {
+                            const expiresAt = new Date(now.getTime() + (memory.expiration_hours * 60 * 60 * 1000));
+                            context.expires_at = expiresAt.toISOString();
+                            context.expiration_hours = memory.expiration_hours;
+                            context.is_volatile = true;
+                            log(`Memory will expire at: ${expiresAt.toISOString()}`);
+                        } else {
+                            context.is_volatile = false;
+                        }
+
+                        memoryService.indexMemory({
+                            text: memory.content,
+                            context: context
                         });
+                        
                         // Log success but don't show in UI
-                        log(`Memory added silently: ${memory.content}`);
+                        log(`Memory added silently: ${memory.content} ${context.is_volatile ? '(volatile, expires in ' + memory.expiration_hours + 'h)' : '(persistent)'}`);
                     } catch (e) {
                         log(`Error storing memory: ${e.message}`);
                     }
@@ -531,7 +661,14 @@ class ProviderAdapter {
             // Clean up any remaining JSON artifacts from the text
             text = text.replace(/\{[\s\S]*?\}/g, '').trim();
             text = text.replace(/\[[\s\S]*?\]/g, '').trim();
-            text = text.replace(/^\s*[\n\r]+/gm, '').trim(); // Remove empty lines
+            
+            // Remove isolated brackets that might be left over after tool extraction
+            text = text.replace(/^\s*[\{\}\[\]]+\s*$/gm, '').trim();
+            text = text.replace(/[\{\}\[\]]/g, '').trim();
+            
+            // Remove empty lines and clean up whitespace
+            text = text.replace(/^\s*[\n\r]+/gm, '').trim();
+            text = text.replace(/\n\s*\n/g, '\n').trim(); // Remove multiple consecutive newlines
         } catch (error) {
             log(`Error processing tool response: ${error.message}`);
         }
@@ -541,7 +678,7 @@ class ProviderAdapter {
     }
 
     // Update LlamaCPP request method to use shared processing and include relevant tools
-    _makeLlamaRequest(text, toolCalls, relevantToolsPrompt) {
+    _makeLlamaRequest(text, toolCalls, relevantToolsPrompt, chatBox = null) {
         const serverUrl = this._settings.get_string('llama-server-url');
         if (!serverUrl) {
             throw new Error('Llama server URL is not set');
@@ -550,31 +687,33 @@ class ProviderAdapter {
         const modelName = this._settings.get_string('llama-model-name') || 'llama';
         const temperature = this._settings.get_double('llama-temperature');
 
-        // Create the system message with tool instructions and relevant tools
-        const systemPrompt = this._getToolSystemPrompt(relevantToolsPrompt);
-        const systemMessage = {
-            role: 'system',
-            content: systemPrompt
-        };
-
-        // Create the user message
-        const userMessage = {
-            role: 'user',
-            content: text
-        };
+        // Use centralized message assembly
+        const messages = this._promptAssembler.assembleMessages(text, relevantToolsPrompt, chatBox);
 
         // Create the request payload
         const payload = {
             model: modelName,
-            messages: [systemMessage, userMessage],
+            messages: messages,
             max_tokens: 1338,
             temperature: temperature,
-            stream: false,
-            functions: toolCalls || [],  // Use the filtered tools
-            function_call: 'auto'
+            stream: false
         };
 
-        log(`Making Llama request with data: ${JSON.stringify(payload)}`);
+        // Add tools if available in the correct format
+        if (toolCalls && toolCalls.length > 0) {
+            payload.tools = toolCalls.map(tool => ({
+                type: "function",
+                function: {
+                    name: tool.name,
+                    description: tool.description,
+                    parameters: tool.parameters
+                }
+            }));
+            payload.tool_choice = "auto";
+        }
+
+        debug(`Making Llama request with tool support. Model: ${modelName}, temp: ${temperature}`);
+        debug(`Tool configuration: ${toolCalls ? toolCalls.length : 0} tools available`);
 
         const message = Soup.Message.new('POST', `${serverUrl}/v1/chat/completions`);
         message.request_headers.append('Content-Type', 'application/json');
@@ -605,7 +744,7 @@ class ProviderAdapter {
     }
 
     // Provider-specific request implementations with relevant tools support
-    _makeOpenAIRequest(text, toolCalls, relevantToolsPrompt) {
+    _makeOpenAIRequest(text, toolCalls, relevantToolsPrompt, chatBox = null) {
         const apiKey = this._settings.get_string('openai-api-key');
         if (!apiKey) {
             throw new Error('OpenAI API key is not set');
@@ -614,13 +753,8 @@ class ProviderAdapter {
         const model = this._settings.get_string('openai-model');
         const temperature = this._settings.get_double('openai-temperature');
 
-        // Add relevant tools to the system prompt
-        const systemPrompt = this._getToolSystemPrompt(relevantToolsPrompt);
-        
-        const messages = [
-            { role: 'system', content: systemPrompt },
-            { role: 'user', content: text }
-        ];
+        // Use centralized message assembly
+        const messages = this._promptAssembler.assembleMessages(text, relevantToolsPrompt, chatBox);
 
         const requestData = {
             model: model,
@@ -629,10 +763,21 @@ class ProviderAdapter {
             temperature: temperature
         };
 
+        // Add tools if available in the correct OpenAI format
         if (toolCalls && toolCalls.length > 0) {
-            requestData.tools = toolCalls;  // Use the filtered tools
+            requestData.tools = toolCalls.map(tool => ({
+                type: "function",
+                function: {
+                    name: tool.name,
+                    description: tool.description,
+                    parameters: tool.parameters
+                }
+            }));
             requestData.tool_choice = "auto";
         }
+
+        debug(`Making OpenAI request with tool support. Model: ${model}, temp: ${temperature}`);
+        debug(`Tool configuration: ${toolCalls ? toolCalls.length : 0} tools available`);
 
         const message = Soup.Message.new('POST', 'https://api.openai.com/v1/chat/completions');
         message.request_headers.append('Authorization', `Bearer ${apiKey}`);
@@ -647,10 +792,9 @@ class ProviderAdapter {
                 }
                 try {
                     const response = JSON.parse(msg.response_body.data);
-                    resolve({
-                        text: response.choices[0].message.content || '',
-                        toolCalls: response.choices[0].message.tool_calls || []
-                    });
+                    // Use shared processing method
+                    const processed = this._processToolResponse(response);
+                    resolve(processed);
                 } catch (error) {
                     reject(`Error parsing OpenAI response: ${error.message}`);
                 }
@@ -658,30 +802,24 @@ class ProviderAdapter {
         });
     }
 
-    _makeGeminiRequest(text, toolCalls, relevantToolsPrompt) {
+    _makeGeminiRequest(text, toolCalls, relevantToolsPrompt, chatBox = null) {
         const apiKey = this._settings.get_string('gemini-api-key');
         if (!apiKey) {
             throw new Error('Gemini API key is not set');
         }
 
-        // Add relevant tools to the system prompt
-        const systemPrompt = this._getToolSystemPrompt(relevantToolsPrompt);
-        
-        // Format the prompt to include tool descriptions
-        const toolDescriptions = toolCalls ? toolCalls.map(tool => 
-            `${tool.name}: ${tool.description}\nRequired parameters: ${Object.entries(tool.parameters)
-                .filter(([_, param]) => param.required)
-                .map(([name, param]) => `${name}: ${param.description}`)
-                .join(', ')}`
-        ).join('\n\n') : '';
-        
-        const fullPrompt = `${systemPrompt}\n\n${toolDescriptions}\n\nUser query: ${text}`;
+        // Use centralized message assembly
+        const messages = this._promptAssembler.assembleMessages(text, relevantToolsPrompt, chatBox);
+        const formattedPrompt = this._promptAssembler.formatForProvider(messages, 'gemini');
         
         const requestData = {
             contents: [{
-                parts: [{ text: fullPrompt }]
+                parts: [{ text: formattedPrompt }]
             }]
         };
+
+        debug(`Making Gemini request with tool support. Model: gemini-pro, temp: ${this._settings.get_double('gemini-temperature')}`);
+        debug(`Tool configuration passed via system prompt: ${toolCalls ? toolCalls.length : 0} tools available`);
 
         const message = Soup.Message.new('POST', `https://generativelanguage.googleapis.com/v1beta/models/gemini-pro:generateContent?key=${apiKey}`);
         message.request_headers.append('Content-Type', 'application/json');
@@ -695,10 +833,9 @@ class ProviderAdapter {
                 }
                 try {
                     const response = JSON.parse(msg.response_body.data);
-                    resolve({
-                        text: response.candidates[0].content.parts[0].text || '',
-                        toolCalls: []
-                    });
+                    // Use shared processing method
+                    const processed = this._processToolResponse(response);
+                    resolve(processed);
                 } catch (error) {
                     reject(`Error parsing Gemini response: ${error.message}`);
                 }
@@ -706,7 +843,7 @@ class ProviderAdapter {
         });
     }
 
-    _makeAnthropicRequest(text, toolCalls, relevantToolsPrompt) {
+    _makeAnthropicRequest(text, toolCalls, relevantToolsPrompt, chatBox = null) {
         const apiKey = this._settings.get_string('anthropic-api-key');
         if (!apiKey) {
             throw new Error('Anthropic API key is not set');
@@ -716,25 +853,19 @@ class ProviderAdapter {
         const temperature = this._settings.get_double('anthropic-temperature');
         const maxTokens = this._settings.get_int('anthropic-max-tokens');
 
-        // Add relevant tools to the system prompt
-        const systemPrompt = this._getToolSystemPrompt(relevantToolsPrompt);
-        
-        // Format the prompt to include tool descriptions
-        const toolDescriptions = toolCalls ? toolCalls.map(tool => 
-            `${tool.name}: ${tool.description}\nRequired parameters: ${Object.entries(tool.parameters)
-                .filter(([_, param]) => param.required)
-                .map(([name, param]) => `${name}: ${param.description}`)
-                .join(', ')}`
-        ).join('\n\n') : '';
-        
-        const anthropicPrompt = `${systemPrompt}\n\n${toolDescriptions}\n\nHuman: ${text}\n\nAssistant:`;
+        // Use centralized message assembly
+        const messages = this._promptAssembler.assembleMessages(text, relevantToolsPrompt, chatBox);
+        const formattedPrompt = this._promptAssembler.formatForProvider(messages, 'anthropic');
 
         const requestData = {
             model: model,
-            prompt: anthropicPrompt,
+            prompt: formattedPrompt,
             max_tokens_to_sample: maxTokens,
             temperature: temperature
         };
+
+        debug(`Making Anthropic request with tool support. Model: ${model}, temp: ${temperature}`);
+        debug(`Tool configuration passed via system prompt: ${toolCalls ? toolCalls.length : 0} tools available`);
 
         const message = Soup.Message.new('POST', 'https://api.anthropic.com/v1/complete');
         message.request_headers.append('X-API-Key', apiKey);
@@ -750,10 +881,9 @@ class ProviderAdapter {
                 }
                 try {
                     const response = JSON.parse(msg.response_body.data);
-                    resolve({
-                        text: response.completion || '',
-                        toolCalls: []
-                    });
+                    // Use shared processing method
+                    const processed = this._processToolResponse(response);
+                    resolve(processed);
                 } catch (error) {
                     reject(`Error parsing Anthropic response: ${error.message}`);
                 }
@@ -761,7 +891,7 @@ class ProviderAdapter {
         });
     }
 
-    _makeOllamaRequest(text, toolCalls, relevantToolsPrompt) {
+    _makeOllamaRequest(text, toolCalls, relevantToolsPrompt, chatBox = null) {
         const serverUrl = this._settings.get_string('ollama-server-url');
         if (!serverUrl) {
             throw new Error('Ollama server URL is not set');
@@ -770,28 +900,23 @@ class ProviderAdapter {
         const modelName = this._settings.get_string('ollama-model-name') || 'llama2';
         const temperature = this._settings.get_double('ollama-temperature');
 
-        // For Ollama, we need to use their chat API which has better support for tools
-        let requestUrl = `${serverUrl}/api/generate`;
+        // Use centralized message assembly
+        const messages = this._promptAssembler.assembleMessages(text, relevantToolsPrompt, chatBox);
+        const formattedPrompt = this._promptAssembler.formatForProvider(messages, 'ollama');
         
-        // Get the system prompt with relevant tools
-        const toolSystemPrompt = this._getToolSystemPrompt(relevantToolsPrompt);
-        
-        // Build the full prompt
-        const fullPrompt = `${toolSystemPrompt}\n\nUser: ${text}`;
-        
-        let requestData = {
+        const requestData = {
             model: modelName,
-            prompt: fullPrompt,
+            prompt: formattedPrompt,
             stream: false,
             options: {
                 temperature: temperature
             }
         };
 
-        log(`Making Ollama request with tool support. Model: ${modelName}, temp: ${temperature}`);
+        debug(`Making Ollama request with tool support. Model: ${modelName}, temp: ${temperature}`);
+        debug(`Tool configuration passed via system prompt: ${toolCalls ? toolCalls.length : 0} tools available`);
         
-        log(`Sending request to Ollama: ${requestUrl}`);
-        const message = Soup.Message.new('POST', requestUrl);
+        const message = Soup.Message.new('POST', `${serverUrl}/api/generate`);
         message.request_headers.append('Content-Type', 'application/json');
         message.set_request_body_from_bytes('application/json', new GLib.Bytes(JSON.stringify(requestData)));
 
@@ -819,49 +944,8 @@ class ProviderAdapter {
         });
     }
 
-    _getToolSystemPrompt(relevantToolsPrompt) {
-        // Format tools as a string if it's an object
-        let toolsString = '';
-        if (typeof relevantToolsPrompt === 'object') {
-            toolsString = JSON.stringify(relevantToolsPrompt, null, 2);
-        } else {
-            toolsString = relevantToolsPrompt || '';
-        }
-
-        return `You are a helpful assistant with access to these tools:
-
-${toolsString}
-
-CRITICAL TOOL USAGE RULES:
-1. NEVER explain how to use tools or provide examples of tool calls
-2. NEVER include tool call JSON in explanations or examples
-3. ONLY output tool call JSON when you are actually executing a tool
-4. When using tools, output ONLY the raw JSON objects: {"tool": "name", "arguments": {"param": "value"}}
-5. DO NOT use markdown, code blocks, or any extra formatting around tool call JSON
-6. DO NOT include any text before or after the JSON objects
-7. You can make MULTIPLE tool calls in a single response by including multiple JSON objects
-8. Respond conversationally if no tool is needed
-
-MEMORY RULES (IMPORTANT):
-- NEVER mention, reference, or allude to memory storage or memory commands in your response to the user
-- When storing memories, include the memory command as a separate JSON object (see tool usage above)
-- Store memories as a side effect only, never as the main point of your response
-- ALWAYS store personal information when it is shared (name, location, timezone, preferences)
-- ALWAYS store important decisions and user preferences
-- ALWAYS store technical details and configurations that might be needed later
-
-EXAMPLES OF WHEN TO STORE MEMORIES:
-1. User shares their location: {"tool": "add_memory", "arguments": {"text": "User's location is Cordova, TN", "context": {"type": "personal_info", "importance": "high"}}}
-2. User sets a preference: {"tool": "add_memory", "arguments": {"text": "User prefers dark mode", "context": {"type": "preference", "importance": "high"}}}
-3. User makes a decision: {"tool": "add_memory", "arguments": {"text": "User chose to use Brave Search as default", "context": {"type": "decision", "importance": "high"}}}
-
-DON'T STORE:
-- Temporary info (time, listings, results)
-- System state
-- Command outputs
-- Web content
-- Dynamic data`;
-    }
+    // Remove the old _assembleMessages method since it's now in PromptAssembler
+    // ... existing code ...
 }
 
 class LLMChatBox {
@@ -889,6 +973,12 @@ class LLMChatBox {
             y_expand: true
         });
 
+        // Create container for chat view
+        this._chatContainer = new St.BoxLayout({
+            vertical: true,
+            y_expand: true
+        });
+
         // Chat history scroll view
         this._scrollView = new St.ScrollView({
             style_class: 'llm-chat-scrollview',
@@ -905,7 +995,21 @@ class LLMChatBox {
         });
         this._scrollView.set_policy(St.PolicyType.NEVER, St.PolicyType.AUTOMATIC);
         this._scrollView.add_actor(this._messageContainer);
-        this.actor.add_child(this._scrollView);
+        this._chatContainer.add_child(this._scrollView);
+
+        // Create container for history view
+        this._historyContainer = new St.BoxLayout({
+            vertical: true,
+            y_expand: true
+        });
+
+        // Add both containers to main actor
+        this.actor.add_child(this._chatContainer);
+        this.actor.add_child(this._historyContainer);
+
+        // Initially show chat view, hide history view
+        this._chatContainer.visible = true;
+        this._historyContainer.visible = false;
 
         // Connect to settings changes for thinking visibility
         this._settingsChangedId = this._settings.connect('changed::hide-thinking', () => {
@@ -941,7 +1045,6 @@ class LLMChatBox {
         this._entryText.clutter_text._keyPressHandlerId = this._entryText.clutter_text.connect('key-press-event', (actor, event) => {
             let keyval = event.get_key_symbol();
             let state = event.get_state();
-            log(`Key press detected: keyval = ${keyval}, state = ${state}`);
 
             // Submit on Enter (without Ctrl)
             if (keyval === Clutter.KEY_Return && !(state & Clutter.ModifierType.CONTROL_MASK)) {
@@ -962,7 +1065,6 @@ class LLMChatBox {
         this._entryText.clutter_text._multiLineHandlerId = this._entryText.clutter_text.connect('key-press-event', (actor, event) => {
             let keyval = event.get_key_symbol();
             let state = event.get_state();
-            log(`Key press detected: keyval = ${keyval}, state = ${state}`);
 
             // Allow new lines on Shift+Enter
             if(keyval === Clutter.KEY_Return && (state & Clutter.ModifierType.SHIFT_MASK)) {
@@ -1024,8 +1126,8 @@ class LLMChatBox {
         this.actor.add_child(inputBox); // Add the entire input box (entry + buttons) to main actor.
         this._adjustWindowHeight(); // Adjust height on creation.
 
-        // Initialize the provider adapter
-        this._providerAdapter = new ProviderAdapter(settings);
+        // Initialize the provider adapter with reference to this chat box
+        this._providerAdapter = new ProviderAdapter(settings, this);
 
         // Initialize tool system
         this.toolLoader = new ToolLoader();
@@ -1185,17 +1287,19 @@ class LLMChatBox {
             this._addMessage('Thinking...', 'assistant', true);
         }
 
-        // Get conversation history
-        const history = this._getConversationHistory();
-
-        // Construct the full prompt with conversation history
-        const fullPrompt = history + message;
+        // Pass just the user message - conversation history will be handled in _assembleMessages
+        const userMessage = message;
         
         // Log the tool calling state and available tools
-        log(`Tool calling is now always enabled. Available tools: ${this.toolLoader.getTools().length}`);
+        // Only log tool availability changes, not every request
+        const toolCount = this.toolLoader.getTools().length;
+        if (!this._lastToolCount || this._lastToolCount !== toolCount) {
+            info(`Tool calling enabled (${toolCount} tools available)`);
+            this._lastToolCount = toolCount;
+        }
 
         // Make the API request using the provider adapter - always enable tool calls
-        this._providerAdapter.makeRequest(fullPrompt, true)
+        this._providerAdapter.makeRequest(userMessage, true)
             .then(response => {
                 log(`Received response from API: text length=${response.text ? response.text.length : 0}, tool calls=${response.toolCalls ? response.toolCalls.length : 0}`);
                 
@@ -1241,11 +1345,12 @@ class LLMChatBox {
     }
 
     _handleToolCalls(toolCalls, originalResponse) {
-        // Log tool calls for debugging
-        log(`Handling tool calls: ${JSON.stringify(toolCalls)}`);
+        // Log tool calls for debugging with more details
+        log(`[Tools] Handling ${toolCalls.length} tool calls`);
         
         // Display the original response text first if it exists
         if (originalResponse && originalResponse.trim()) {
+            log(`[Tools] Adding initial AI response (${originalResponse.length} chars)`);
             this._addMessage(originalResponse, 'ai');
         }
         
@@ -1253,7 +1358,7 @@ class LLMChatBox {
         this._toolCallCount++;
         if (this._toolCallCount > this._maxToolCalls) {
             const errorMsg = `Tool call limit exceeded (${this._maxToolCalls} calls). This might indicate a loop in the AI's reasoning. Stopping further tool calls.`;
-            log(errorMsg);
+            log(`[Tools] ${errorMsg}`);
             this._addMessage(errorMsg, 'system');
             this._toolCallCount = 0; // Reset counter
             this._recentToolCalls = []; // Clear recent calls
@@ -1264,38 +1369,135 @@ class LLMChatBox {
             return;
         }
 
-        // Store and check for repeated tool calls
-        const currentCall = toolCalls.map(call => ({
+        // Store and check for repeated tool calls - improve parsing of tool calls
+        const currentCall = toolCalls.map(call => {
+            // Make sure arguments are properly parsed
+            let args;
+            try {
+                if (typeof call.function.arguments === 'string') {
+                    args = JSON.parse(call.function.arguments);
+                } else {
+                    args = call.function.arguments;
+                }
+            } catch (e) {
+                log(`[Tools] Error parsing tool arguments: ${e.message}`);
+                args = call.function.arguments; // Keep as string if parsing fails
+            }
+            
+            return {
             name: call.function.name,
-            args: call.function.arguments
-        }));
+                args: args
+            };
+        });
         
-        // Check for repeated identical calls with context awareness
-        const isRepeatedCall = this._recentToolCalls.some(prevCall => {
-            // For web search and content fetching, allow repeated calls with different arguments
-            if (currentCall[0].name === 'web_search' || currentCall[0].name === 'fetch_web_content') {
-                return false; // Allow repeated calls for these tools
+        // Log parsed call details for debugging
+        currentCall.forEach((call, i) => {
+            log(`[Tools] Call ${i+1}: ${call.name} with args: ${JSON.stringify(call.args)}`);
+        });
+        
+        // Check for repeated or similar calls with enhanced detection
+        const isRepeatedCall = this._recentToolCalls.some((prevCall, idx) => {
+            // For web search, check for semantic similarity in queries
+            if (currentCall[0].name === 'web_search' && prevCall.some(p => p.name === 'web_search')) {
+                const currentQuery = currentCall[0].args.query?.toLowerCase().trim() || '';
+                
+                // Skip if current query is empty (malformed call)
+                if (!currentQuery) return false;
+                
+                // Find similar previous web searches
+                return prevCall.some(p => {
+                    if (p.name === 'web_search') {
+                        const prevQuery = p.args.query?.toLowerCase().trim() || '';
+                        
+                        // Skip if previous query is empty
+                        if (!prevQuery) return false;
+                        
+                        // Check for exact match
+                        if (prevQuery === currentQuery) {
+                            log(`[Tools] Exact duplicate search: "${prevQuery}"`);
+                            return true;
+                        }
+                        
+                        // Check for rearranged words (e.g. "weather Memphis" vs "Memphis weather")
+                        const currWords = new Set(currentQuery.split(/\s+/));
+                        const prevWords = new Set(prevQuery.split(/\s+/));
+                        
+                        // If either set contains at least 75% of the other's words, consider them similar
+                        const intersection = [...currWords].filter(word => prevWords.has(word));
+                        if (intersection.length >= currWords.size * 0.75 || 
+                            intersection.length >= prevWords.size * 0.75) {
+                            log(`[Tools] Similar search detected: "${prevQuery}" vs "${currentQuery}" (${intersection.length} common words)`);
+                            return true;
+                        }
+                        
+                        return false;
+                    }
+                    return false;
+                });
+            }
+            // For content fetching, check for URL overlaps
+            else if (currentCall[0].name === 'fetch_web_content' && prevCall.some(p => p.name === 'fetch_web_content')) {
+                const currentUrls = Array.isArray(currentCall[0].args.urls) ? 
+                    currentCall[0].args.urls : [currentCall[0].args.urls];
+                
+                // Check if we've already fetched any of these URLs
+                return prevCall.some(p => {
+                    if (p.name === 'fetch_web_content') {
+                        const prevUrls = Array.isArray(p.args.urls) ? p.args.urls : [p.args.urls];
+                        const overlap = currentUrls.filter(url => prevUrls.includes(url));
+                        if (overlap.length > 0) {
+                            log(`[Tools] Duplicate URL fetch detected: ${overlap.join(', ')}`);
+                            return true;
+                        }
+                        return false;
+                    }
+                    return false;
+                });
             }
             // For other tools, check for exact matches
-            return JSON.stringify(prevCall) === JSON.stringify(currentCall);
+            const exactMatch = JSON.stringify(prevCall) === JSON.stringify(currentCall);
+            if (exactMatch) {
+                log(`[Tools] Exact duplicate tool call detected at position ${idx}`);
+            }
+            return exactMatch;
         });
 
         if (isRepeatedCall) {
-            const errorMsg = "Detected repeated identical tool calls. Stopping to prevent loops.";
-            log(errorMsg);
+            // Prepare a detailed message about the redundant call for logging
+            const currentToolInfo = currentCall[0].name === 'web_search' ? 
+                `web_search("${currentCall[0].args.query}")` : 
+                `${currentCall[0].name}()`;
+            
+            // Get similar previous call information
+            let similarPrevCall = "";
+            this._recentToolCalls.forEach((prevCalls, idx) => {
+                prevCalls.forEach(prev => {
+                    if (prev.name === currentCall[0].name) {
+                        if (prev.name === 'web_search' && prev.args.query) {
+                            similarPrevCall = `web_search("${prev.args.query}")`;
+                        } else {
+                            similarPrevCall = `${prev.name}()`;
+                        }
+                    }
+                });
+            });
+            
+            const errorMsg = `Detected redundant tool call: ${currentToolInfo}, similar to previous call: ${similarPrevCall}. Using existing results instead.`;
+            log(`[Tools] ${errorMsg}`);
             this._addMessage(errorMsg, 'system');
             this._toolCallCount = 0; // Reset counter
-            this._recentToolCalls = []; // Clear recent calls
             
-            // Add a final response that uses the information we have
-            const finalResponse = `I've already executed this tool call. Based on the previous results, the current time is ${new Date().toLocaleTimeString()}.`;
+            // Add a final response that uses the information we have, but don't clear recent calls
+            // so we maintain context about what was already done
+            const finalResponse = `I noticed I was attempting to make a redundant tool call. Based on the information we've already gathered, I'll provide an answer using the existing results.`;
             this._addMessage(finalResponse, 'ai');
             return;
         }
 
-        // Add current call to recent calls
+        // Add current call to recent calls with proper formatting
         this._recentToolCalls.push(currentCall);
         if (this._recentToolCalls.length > this._maxRecentToolCalls) {
+            log(`[Tools] Removing oldest tool call set (keeping last ${this._maxRecentToolCalls})`);
             this._recentToolCalls.shift(); // Remove oldest call
         }
 
@@ -1349,38 +1551,33 @@ class LLMChatBox {
                 // Check if all tool calls were memory-related
                 const allMemoryCalls = results.every(result => result.toolName === 'add_memory');
                 
-                // Show user-friendly status message for each tool result, excluding memory tool calls
-                results.forEach(result => {
-                    if (result.toolName !== 'add_memory') {
-                        if (result.result && result.result.message) {
-                            this._addMessage(result.result.message, 'system');
-                        } else if (result.result && result.result.error) {
-                            this._addMessage(`❌ Tool error: ${result.result.error}`, 'system');
-                        }
-                    }
-                });
-                
                 // Create a better format for the results that includes tool name and args
-                const toolResults = results.map(result => ({
+                // Also log more details about each result for debugging
+                const toolResults = results.map(result => {
+                    log(`[Tools] Processing result for ${result.toolName}`);
+                    const formattedResult = {
                     name: result.toolName,
                     arguments: result.args,
                     result: result.result
-                }));
+                    };
+                    // Log result size for debugging
+                    const resultSize = JSON.stringify(result.result).length;
+                    log(`[Tools] Result size for ${result.toolName}: ${resultSize} chars`);
+                    return formattedResult;
+                });
 
                 // If we have tool results and they're not all memory calls, make a follow-up request
                 if (toolResults.length > 0 && !allMemoryCalls) {
-                    // Create a simplified status message for the UI, excluding memory tool calls
-                    let toolStatusMessage = "Tool execution status:\n";
-                    toolResults.forEach(result => {
-                        if (result.name !== 'add_memory') {
-                            const status = result.result?.error ? "Failed" : "Success";
-                            toolStatusMessage += `• ${result.name}: ${status}\n`;
-                        }
-                    });
-                    
-                    // Only show tool status if there are non-memory tools
-                    if (toolResults.some(r => r.name !== 'add_memory')) {
-                        this._addMessage(toolStatusMessage, 'system', false, toolResults);
+                    // Show a single, clean summary of tool execution
+                    const nonMemoryResults = toolResults.filter(r => r.name !== 'add_memory');
+                    if (nonMemoryResults.length > 0) {
+                        const summary = nonMemoryResults.map(result => {
+                            const status = result.result?.error ? "❌ Failed" : "✅ Success";
+                            const args = result.arguments?.query || result.arguments?.url || result.arguments?.action || '';
+                            const argsDisplay = args ? ` (${args})` : '';
+                            return `${result.name}${argsDisplay}: ${status}`;
+                        }).join('\n');
+                        this._addMessage(`Tool execution:\n${summary}`, 'system');
                     }
                     
                     // Build history of all tool calls made in this session
@@ -1409,14 +1606,31 @@ class LLMChatBox {
                     }).join('\n\n');
 
                     // Make the follow-up prompt more directive for the LLM
-                    const followUpPrompt = `Here are the results from the tools I used to help answer your request:\n\n${toolResultsText}\n\nPlease use this information to provide a complete answer to the user's question. Do not make additional tool calls.`;
+                    const followUpPrompt = `IMPORTANT: I have already gathered all the necessary information using tools. Here are the complete results:
+
+${toolResultsText}
+
+CURRENT TOOL CALL SEQUENCE: ${this._recentToolCalls.map((calls, idx) => 
+    `[Set ${idx+1}] ` + calls.map(call => `${call.name}("${JSON.stringify(call.args).substring(0, 40)}...")`).join(", ")
+).join(" → ")}
+
+CRITICAL INSTRUCTIONS FOR RESPONSE:
+- This information is SUFFICIENT to answer the user's question completely
+- You MUST use the existing tool results above - DO NOT request more data
+- ⚠️ Any attempt to make a new web search or other tool call will be REJECTED
+- ⚠️ I have detected multiple redundant searches already - DO NOT continue this pattern
+- If you find the existing information incomplete, work with what you have
+- All necessary information is contained in the tool results above
+- Synthesize a complete, coherent answer SOLELY from the information provided
+
+Please provide your final answer now using ONLY the tool results above.`;
                     
-                    log(`Making follow-up request with tool results and instructions for next steps`);
+                    log(`[Tools] Making follow-up request with tool results and instructions for next steps`);
                     
                     // Add a temporary message
                     this._addMessage("Processing tool results...", 'assistant', true);
                     
-                    // Always enable tool calling for follow-up requests
+                    // Always enable tool calling for follow-up requests, and pass the current chatBox for history
                     this._providerAdapter.makeRequest(followUpPrompt, true)
                         .then(response => {
                             // Remove the temporary message
@@ -1445,12 +1659,12 @@ class LLMChatBox {
                                 
                                 if (isNewToolCall) {
                                     // These appear to be legitimately new tool calls
-                                    log('Received new, different tool calls. Processing...');
+                                    log(`[Tools] Received ${response.toolCalls.length} new, different tool calls. Processing...`);
                                     this._handleToolCalls(response.toolCalls, response.text || originalResponse);
                                 } else {
                                     // These are repeated tool calls - break the loop
-                                    log('Received repeated tool calls despite warnings. Breaking loop.');
-                                    const errorMsg = "The AI attempted to make repeated tool calls. Stopping to prevent loops.";
+                                    log(`[Tools] Received ${response.toolCalls.length} repeated tool calls despite warnings. Breaking loop.`);
+                                    const errorMsg = "The AI attempted to make repeated tool calls. Stopping to prevent loops and using existing information.";
                                     this._addMessage(errorMsg, 'system');
                                     
                                     // Generate a final response based on available information
@@ -1508,77 +1722,271 @@ class LLMChatBox {
     }
 
     _getConversationHistory() {
-        // Configurable token budget (can be set in settings or as a constant)
-        const MAX_TOKENS = this._settings.get_int('max-context-tokens') || 2000;
+        // Get provider-specific context window limits
+        const provider = this._settings.get_string('service-provider');
+        const userMaxTokens = this._settings.get_int('max-context-tokens') || 2000;
+        
+        // Provider-specific context window sizes (conservative estimates)
+        const providerLimits = {
+            'openai': 8000,      // GPT-4 has 8k base, some models have 32k+
+            'anthropic': 100000, // Claude has very large context window
+            'gemini': 30000,     // Gemini Pro has large context
+            'llama': 4000,       // Local models vary, conservative estimate
+            'ollama': 4000       // Local models, conservative estimate
+        };
+        
+        // Use the smaller of user setting or provider limit, but ensure minimum usability
+        const providerLimit = providerLimits[provider] || 4000;
+        const MAX_TOKENS = Math.min(userMaxTokens, providerLimit);
+        const MIN_TOKENS = Math.max(500, Math.min(1000, MAX_TOKENS * 0.25)); // At least 25% for recent context
+        
+        // Only log provider details on first use or when settings change
+        if (!this._lastProviderConfig || 
+            this._lastProviderConfig.provider !== provider || 
+            this._lastProviderConfig.maxTokens !== MAX_TOKENS) {
+            log(`[Context] Provider: ${provider}, User limit: ${userMaxTokens}, Provider limit: ${providerLimit}, Effective limit: ${MAX_TOKENS}`);
+            this._lastProviderConfig = { provider, maxTokens: MAX_TOKENS };
+        }
+        
         const IMPORTANT_SENDERS = ['system', 'tool', 'memory'];
         const recentMessages = [...this._messages];
         let history = '';
         let tokenCount = 0;
         let omittedCount = 0;
-        let importantMessages = [];
-
-        // Helper: estimate tokens (rough, 1 token ≈ 4 chars)
-        const estimateTokens = (text) => Math.ceil(text.length / 4);
-
-        // Helper: concise message formatting
-        const formatMessage = (msg) => {
-            if (msg.isThinking) return '';
-            if (msg.sender === 'user') return `User: ${msg.text}\n`;
-            if (msg.sender === 'ai') return `Assistant: ${msg.text}\n`;
-            if (msg.sender === 'system') return `System: ${msg.text}\n`;
-            if (msg.sender === 'tool' || msg.sender === 'memory') return `System: ${msg.text}\n`;
-            return '';
+        
+        // Improved token estimation based on provider
+        const estimateTokens = (text) => {
+            if (!text) return 0;
+            
+            // More accurate token estimation based on provider
+            let ratio;
+            switch (provider) {
+                case 'openai':
+                    // OpenAI tokenization: roughly 1 token per 3.3 characters for English
+                    ratio = 3.3;
+                    break;
+                case 'anthropic':
+                    // Claude tokenization: roughly 1 token per 3.5 characters
+                    ratio = 3.5;
+                    break;
+                case 'gemini':
+                    // Gemini tokenization: roughly 1 token per 3.8 characters
+                    ratio = 3.8;
+                    break;
+                default:
+                    // Conservative estimate for local models
+                    ratio = 4.0;
+            }
+            
+            // Account for special tokens, formatting, and overhead
+            const baseTokens = Math.ceil(text.length / ratio);
+            const overhead = Math.ceil(baseTokens * 0.1); // 10% overhead for formatting
+            return baseTokens + overhead;
         };
 
-        // Always include important messages (system/tool/memory)
-        for (const msg of recentMessages) {
-            if (IMPORTANT_SENDERS.includes(msg.sender)) {
-                importantMessages.push(msg);
+        // Enhanced message formatting with token-aware truncation
+        const formatMessage = (msg, maxTokensForMessage = null) => {
+            if (msg.isThinking && this._settings.get_boolean('hide-thinking')) return '';
+            
+            let formatted = '';
+            let content = msg.text || '';
+            
+            // Truncate very long messages if needed
+            if (maxTokensForMessage && estimateTokens(content) > maxTokensForMessage) {
+                const targetChars = Math.floor(maxTokensForMessage * 3.5); // Conservative conversion
+                if (content.length > targetChars) {
+                    content = content.substring(0, targetChars - 50) + '... [truncated]';
+                }
             }
-        }
-        // Remove duplicates
-        importantMessages = importantMessages.filter((msg, idx, arr) =>
-            arr.findIndex(m => m.text === msg.text && m.sender === msg.sender) === idx
-        );
+            
+            if (msg.sender === 'user') {
+                formatted = `User: ${content}\n`;
+            } else if (msg.sender === 'ai') {
+                formatted = `Assistant: ${content}\n`;
+                
+                // Include concise tool results summary
+                if (msg.toolResults && msg.toolResults.length > 0) {
+                    const toolSummary = msg.toolResults.map(result => {
+                        if (result.name === 'web_search' && result.query) {
+                            return `web_search("${result.query}")`;
+                        } else if (result.name === 'fetch_web_content' && result.urls) {
+                            const urlCount = Array.isArray(result.urls) ? result.urls.length : 1;
+                            return `fetch_web_content(${urlCount} URLs)`;
+                        } else {
+                            return `${result.name}()`;
+                        }
+                    }).join(', ');
+                    formatted += `[Used tools: ${toolSummary}]\n`;
+                }
+            } else if (msg.sender === 'system') {
+                // Truncate system messages more aggressively if needed
+                if (maxTokensForMessage && estimateTokens(content) > maxTokensForMessage) {
+                    const targetChars = Math.floor(maxTokensForMessage * 3.0);
+                    if (content.length > targetChars) {
+                        content = content.substring(0, targetChars - 30) + '...[truncated]';
+                    }
+                }
+                formatted = `System: ${content}\n`;
+            } else if (msg.sender === 'tool' || msg.sender === 'memory') {
+                formatted = `Tool: ${content}\n`;
+            }
+            
+            return formatted;
+        };
 
-        // Add important messages first
-        for (const msg of importantMessages) {
-            const formatted = formatMessage(msg);
-            const msgTokens = estimateTokens(formatted);
-            if (tokenCount + msgTokens > MAX_TOKENS * 0.5) break; // Don't let important messages use more than half
-            history += formatted;
-            tokenCount += msgTokens;
-        }
-
-        // Add as many recent messages as possible (sliding window, newest to oldest)
-        let slidingHistory = '';
-        let slidingTokens = 0;
+        // Phase 1: Collect and categorize messages by importance
+        const criticalMessages = [];    // Must include (recent user queries, tool results)
+        const importantMessages = [];   // Should include (system messages, memory)
+        const regularMessages = [];     // Nice to have (older conversation)
+        
+        // Categorize messages by importance and recency
         for (let i = recentMessages.length - 1; i >= 0; i--) {
             const msg = recentMessages[i];
-            if (importantMessages.includes(msg)) continue; // Already included
+            const age = recentMessages.length - i - 1;
+            
+            if (msg.isThinking && this._settings.get_boolean('hide-thinking')) {
+                continue; // Skip thinking messages if hidden
+            }
+            
+            // Critical: Recent user messages and AI responses (last 6 messages)
+            if (age < 6 && (msg.sender === 'user' || msg.sender === 'ai')) {
+                criticalMessages.push(msg);
+            }
+            // Important: System messages, tool results, memory within last 20 messages
+            else if (age < 20 && IMPORTANT_SENDERS.includes(msg.sender)) {
+                importantMessages.push(msg);
+            }
+            // Regular: Everything else
+            else {
+                regularMessages.push(msg);
+            }
+        }
+        
+        // Phase 2: Add messages in order of priority
+        let messages = [];
+        
+        // Always include critical messages (reverse to maintain chronological order)
+        criticalMessages.reverse().forEach(msg => {
             const formatted = formatMessage(msg);
-            const msgTokens = estimateTokens(formatted);
-            if (tokenCount + slidingTokens + msgTokens > MAX_TOKENS) {
-                omittedCount = i + 1;
-                break;
+            const tokens = estimateTokens(formatted);
+            if (tokenCount + tokens <= MAX_TOKENS) {
+                messages.push({ msg, formatted, tokens });
+                tokenCount += tokens;
             }
-            slidingHistory = formatted + slidingHistory;
-            slidingTokens += msgTokens;
-        }
-        history += slidingHistory;
-        tokenCount += slidingTokens;
-
-        // Add summary if older context omitted
+        });
+        
+        // Add important messages if space allows
+        importantMessages.reverse().forEach(msg => {
+            const formatted = formatMessage(msg);
+            const tokens = estimateTokens(formatted);
+            if (tokenCount + tokens <= MAX_TOKENS * 0.8) { // Reserve 20% for regular messages
+                messages.push({ msg, formatted, tokens });
+                tokenCount += tokens;
+            }
+        });
+        
+        // Add as many regular messages as possible (newest first)
+        regularMessages.forEach(msg => {
+            const remainingTokens = MAX_TOKENS - tokenCount;
+            if (remainingTokens > MIN_TOKENS) { // Ensure we have minimum space
+                const maxForMessage = Math.min(remainingTokens, MAX_TOKENS * 0.1); // Max 10% per message
+                const formatted = formatMessage(msg, maxForMessage);
+                const tokens = estimateTokens(formatted);
+                if (tokens <= remainingTokens) {
+                    messages.push({ msg, formatted, tokens });
+                    tokenCount += tokens;
+                } else {
+                    omittedCount++;
+                }
+            } else {
+                omittedCount++;
+            }
+        });
+        
+        // Phase 3: Sort messages chronologically and build history
+        messages.sort((a, b) => {
+            const aIndex = recentMessages.indexOf(a.msg);
+            const bIndex = recentMessages.indexOf(b.msg);
+            return aIndex - bIndex;
+        });
+        
+        // Build the final history string
         if (omittedCount > 0) {
-            const summary = `[Previous ${omittedCount} messages omitted for brevity]\n`;
-            if (tokenCount + estimateTokens(summary) <= MAX_TOKENS) {
-                history = summary + history;
+            const omissionSummary = `[${omittedCount} older messages omitted to fit context window]\n\n`;
+            const omissionTokens = estimateTokens(omissionSummary);
+            if (tokenCount + omissionTokens <= MAX_TOKENS) {
+                history += omissionSummary;
+                tokenCount += omissionTokens;
             }
         }
-
-        // Debug log the final prompt
-        log(`[DEBUG] Final prompt sent to LLM (token est: ${tokenCount}):\n${history}`);
+        
+        // Add tool call summary to prevent redundancy
+        const recentToolCalls = this._getRecentToolCallSummary();
+        if (recentToolCalls) {
+            const toolCallTokens = estimateTokens(recentToolCalls);
+            if (tokenCount + toolCallTokens <= MAX_TOKENS) {
+                history += recentToolCalls;
+                tokenCount += toolCallTokens;
+            }
+        }
+        
+        // Add formatted messages
+        messages.forEach(({ formatted }) => {
+            history += formatted;
+        });
+        
+        // Phase 4: Final optimization - consolidated logging to reduce spam
+        const utilizationPercent = (tokenCount / MAX_TOKENS) * 100;
+        
+        // Only log context details if there are significant changes or issues
+        if (!this._lastTokenCount || Math.abs(tokenCount - this._lastTokenCount) > 500 || 
+            utilizationPercent > 90 || utilizationPercent < 40) {
+            
+            let logMessage = `[Context] ${tokenCount}/${MAX_TOKENS} tokens (${utilizationPercent.toFixed(1)}%), ${messages.length} messages`;
+            if (omittedCount > 0) logMessage += `, ${omittedCount} omitted`;
+            
+            // Add context advice only when needed
+            if (utilizationPercent > 90 && omittedCount > 0) {
+                logMessage += ` - High utilization, consider increasing max-context-tokens`;
+            } else if (utilizationPercent < 40 && omittedCount > 0) {
+                logMessage += ` - Low utilization, context window underused`;
+            }
+            
+            log(logMessage);
+            this._lastTokenCount = tokenCount;
+        }
+        
         return history;
+    }
+
+    _getRecentToolCallSummary() {
+        if (!this._recentToolCalls || this._recentToolCalls.length === 0) {
+            return null;
+        }
+
+        // Get the last 3 tool call sets (most recent)
+        const recentCalls = this._recentToolCalls.slice(-3);
+        
+        let summary = "RECENT TOOL USAGE (to avoid redundant calls):\n";
+        
+        recentCalls.forEach((callSet, index) => {
+            const callDescriptions = callSet.map(call => {
+                if (call.name === 'web_search') {
+                    return `web_search: "${call.args.query}"`;
+                } else if (call.name === 'fetch_web_content') {
+                    const urls = Array.isArray(call.args.urls) ? call.args.urls : [call.args.urls];
+                    return `fetch_web_content: ${urls.length} URLs`;
+                } else {
+                    return `${call.name}: executed`;
+                }
+            }).join(', ');
+            
+            summary += `${index + 1}. ${callDescriptions}\n`;
+        });
+        
+        summary += "NOTE: Check if the information you need was already gathered above before making new tool calls.\n\n";
+        
+        return summary;
     }
 
     _generateContextSummary() {
@@ -1667,7 +2075,7 @@ class LLMChatBox {
                 style_class: 'llm-chat-message-content'
             });
 
-            // Add the main text
+            // Add the main text with linking support
             const textLabel = new St.Label({
                 text: mainText,
                 x_expand: true
@@ -1677,6 +2085,38 @@ class LLMChatBox {
             textLabel.clutter_text.ellipsize = Pango.EllipsizeMode.NONE;
             textLabel.clutter_text.single_line_mode = false;
             mainContent.add_child(textLabel);
+
+            // Add message linking UI
+            if (sender === 'ai') {
+                const linkBox = new St.BoxLayout({
+                    vertical: false,
+                    style_class: 'llm-chat-message-links'
+                });
+
+                // Add "Link to Previous" button if not first message
+                if (this._messages.length > 1) {
+                    const linkButton = new St.Button({
+                        style_class: 'llm-chat-link-button',
+                        label: 'Link to Previous'
+                    });
+                    linkButton.connect('clicked', () => {
+                        this._linkToPreviousMessage(message);
+                    });
+                    linkBox.add_child(linkButton);
+                }
+
+                // Add "Find Related" button
+                const findRelatedButton = new St.Button({
+                    style_class: 'llm-chat-link-button',
+                    label: 'Find Related'
+                });
+                findRelatedButton.connect('clicked', () => {
+                    this._findRelatedMessages(message);
+                });
+                linkBox.add_child(findRelatedButton);
+
+                mainContent.add_child(linkBox);
+            }
 
             // Add sources if this is an AI message with tool results
             if (sender === 'ai' && toolResults) {
@@ -1746,6 +2186,52 @@ class LLMChatBox {
             messageActor.add_child(mainContent);
             this._messageContainer.add_child(messageActor);
             this._scrollToBottom();
+        }
+    }
+
+    _linkToPreviousMessage(message) {
+        // Find the previous AI message
+        const prevMessageIndex = this._messages.findIndex(m => m === message) - 1;
+        if (prevMessageIndex >= 0) {
+            const prevMessage = this._messages[prevMessageIndex];
+            if (prevMessage.sender === 'ai') {
+                // Add a visual link between messages
+                const linkMessage = {
+                    text: `Linked to previous message about: ${prevMessage.text.substring(0, 50)}...`,
+                    sender: 'system',
+                    timestamp: new Date().toISOString(),
+                    isThinking: false,
+                    toolResults: null
+                };
+                this._addMessage(linkMessage.text, linkMessage.sender, false, null, true);
+            }
+        }
+    }
+
+    async _findRelatedMessages(message) {
+        try {
+            // Use memory service to find semantically related messages
+            const relatedMessages = await this._memoryService.getRelevantMemories(message.text, 3);
+            
+            if (relatedMessages.length > 0) {
+                const relatedText = relatedMessages.map(m => 
+                    `Related message: ${m.text.substring(0, 100)}...`
+                ).join('\n');
+                
+                const linkMessage = {
+                    text: `Found related messages:\n${relatedText}`,
+                    sender: 'system',
+                    timestamp: new Date().toISOString(),
+                    isThinking: false,
+                    toolResults: null
+                };
+                this._addMessage(linkMessage.text, linkMessage.sender, false, null, true);
+            } else {
+                this._addMessage('No related messages found.', 'system', false, null, true);
+            }
+        } catch (error) {
+            log(`Error finding related messages: ${error.message}`);
+            this._addMessage('Error finding related messages.', 'system', false, null, true);
         }
     }
 
@@ -1930,122 +2416,135 @@ class LLMChatBox {
     }
     
     _showSessionHistoryView() {
-        log('Showing session history view');
-
-        // Clear previous content to avoid duplicates
-        if (this._messageContainer) {
-            this._messageContainer.destroy_all_children();
+        if (this._historyContainer.visible) {
+            return;
         }
 
         this._currentView = 'history';
         
-        // Save current session if it has messages
-        if (this._messages.length > 0) {
-            this._saveCurrentSession();
-        }
-        
-        // Clear the message container to show history instead
-        this._messageContainer.destroy_all_children();
-        
-        // Create header with back button
-        const headerBox = new St.BoxLayout({
+        this._chatContainer.visible = false;
+        this._historyContainer.visible = true;
+        this._entryText.visible = false;
+
+        // Create header if it doesn't exist
+        if (!this._historyHeader) {
+            this._historyHeader = new St.BoxLayout({
+                style_class: 'session-history-header',
             vertical: false,
-            style_class: 'session-history-header-box'
+                // Use flex-shrink to keep header fixed
+                x_expand: true, // Ensure header stretches horizontally
+                // vertical: false is default, so we don't need to specify
         });
         
-        // Back button to return to chat
+            // Back button
         const backButton = new St.Button({
             style_class: 'session-history-back-button',
-            label: 'Back to Chat'
+                label: '← Back',
+                can_focus: true,
+                x_expand: false, // Don't expand horizontally
+                y_align: Clutter.ActorAlign.CENTER // Center vertically
         });
-        backButton.connect('clicked', () => {
-            this._showChatView();
-        });
+            backButton.connect('clicked', () => this._showChatView());
+            this._historyHeader.add(backButton);
+
+            // Search entry
+            this._historySearchEntry = new St.Entry({
+                style_class: 'session-history-search',
+                hint_text: 'Search sessions...',
+                can_focus: true,
+                x_expand: true, // Allow search to expand horizontally
+                y_align: Clutter.ActorAlign.CENTER // Center vertically
+            });
+            // Connect search handler after widget is fully initialized
+            // Using 'notify::text' signal for StEntry text changes
+            if (this._historySearchEntry && !this._searchHandlerConnected) {
+                 this._historySearchEntry.connect('notify::text', () => {
+                     const query = this._historySearchEntry.get_text();
+                     this._searchSessions(query);
+                 });
+                 this._searchHandlerConnected = true;
+             }
+            this._historyHeader.add(this._historySearchEntry);
+
+            this._historyContainer.add(this._historyHeader);
+        }
+
+        // Create session scroll view and container if they don't exist
+        if (!this._sessionScrollView) {
+             this._sessionScrollView = new St.ScrollView({
+                 style_class: 'session-history-scrollview',
+                 hscrollbar_policy: St.PolicyType.NEVER,
+                 vscrollbar_policy: St.PolicyType.AUTOMATIC,
+                 overlay_scrollbars: true,
+                 y_expand: true, // Allow scroll view to take available vertical space
+                 x_expand: true  // Allow scroll view to take available horizontal space
+             });
+
+             this._sessionContainer = new St.BoxLayout({
+                 style_class: 'session-history-container',
+                 vertical: true,
+                 x_expand: true // Allow the inner container to expand horizontally
+             });
+             this._sessionScrollView.add_actor(this._sessionContainer);
+             this._historyContainer.add(this._sessionScrollView);
+         }
+
+        // Clear existing sessions
+        this._sessionContainer.destroy_all_children();
         
-        const headerLabel = new St.Label({
-            text: 'Chat History',
-            style_class: 'session-history-header'
-        });
-        
-        headerBox.add_child(backButton);
-        headerBox.add_child(headerLabel);
-        this._messageContainer.add_child(headerBox);
-        
-        // Create new chat button
-        const newChatBox = new St.BoxLayout({
-            vertical: false,
-            style_class: 'session-history-new-chat-box'
-        });
-        
-        const newChatButton = new St.Button({
-            style_class: 'session-history-new-chat-button',
-            label: 'Start New Chat'
-        });
-        newChatButton.connect('clicked', () => {
-            this._startNewSession();
-            this._showChatView();
-        });
-        
-        newChatBox.add_child(newChatButton);
-        this._messageContainer.add_child(newChatBox);
-        
-        // Add separator
-        const separator = new St.BoxLayout({
-            style_class: 'session-history-separator'
-        });
-        this._messageContainer.add_child(separator);
-        
-        // Get session list and display them
-        const sessions = this._sessionManager.listSessions();
+        // Load sessions
+        this._loadSessions();
+    }
+
+    async _loadSessions() {
+        try {
+            const sessions = await this._sessionManager.listSessions();
+            this._displaySessions(sessions);
+        } catch (error) {
+            log(`Error loading sessions: ${error.message}`);
+        }
+    }
+
+    async _searchSessions(query) {
+        if (!query || query.trim() === '') {
+            await this._loadSessions();
+            return;
+        }
+
+        try {
+            const sessions = await this._sessionManager.searchSessions(query);
+            this._displaySessions(sessions);
+        } catch (error) {
+            log(`Error searching sessions: ${error.message}`);
+        }
+    }
+
+    _displaySessions(sessions) {
+        log(`[DEBUG] _displaySessions called with ${sessions.length} sessions.`);
+        // Clear existing sessions
+        this._sessionContainer.destroy_all_children();
         
         if (sessions.length === 0) {
+            log('[DEBUG] No sessions to display.');
             const noSessions = new St.Label({
                 text: 'No saved chats',
                 style_class: 'session-history-empty'
             });
-            this._messageContainer.add_child(noSessions);
-        } else {
-            // Create scrollable container for sessions
-            const sessionsScrollBox = new St.ScrollView({
-                style_class: 'session-history-scrollbox',
-                hscrollbar_policy: St.PolicyType.NEVER,
-                vscrollbar_policy: St.PolicyType.AUTOMATIC
-            });
-            
-            const sessionsBox = new St.BoxLayout({
-                vertical: true,
-                style_class: 'session-history-list'
-            });
+            this._sessionContainer.add_child(noSessions);
+            return;
+        }
             
             // Add each session
             sessions.forEach(session => {
+            log(`[DEBUG] Displaying session: ${session.id} - ${session.title}`);
                 const sessionItem = this._createSessionHistoryItem(session);
-                sessionsBox.add_child(sessionItem);
-            });
-            
-            sessionsScrollBox.add_actor(sessionsBox);
-            this._messageContainer.add_child(sessionsScrollBox);
-        }
-        
-        // Disable text entry while in history view
-        this._entryText.set_text('');
-        this._entryText.reactive = false;
-        this._entryText.can_focus = false;
-    }
-    
-    _showChatView() {
-        log('Showing chat view');
-        this._currentView = 'chat';
-        // Clear and rebuild message container with current session
-        this._messageContainer.destroy_all_children();
-        // Restore all messages from the current session, but do not add to history
-        this._messages.forEach(msg => {
-            this._addMessage(msg.text, msg.sender, msg.isThinking, msg.toolResults, false);
+            this._sessionContainer.add_child(sessionItem);
         });
-        // Re-enable text entry
-        this._entryText.reactive = true;
-        this._entryText.can_focus = true;
-        this._entryText.grab_key_focus();
+         // Force a relayout to ensure UI updates
+        this._sessionContainer.queue_relayout();
+        if (this._sessionScrollView) {
+            this._sessionScrollView.queue_relayout();
+        }
     }
     
     _createSessionHistoryItem(session) {
@@ -2095,28 +2594,7 @@ class LLMChatBox {
             style_class: 'session-history-item-info'
         });
         
-        // First/last message preview
-        let firstMsg = '';
-        let lastMsg = '';
-        if (session.id && this._sessionManager) {
-            const fullSession = this._sessionManager.loadSession(session.id);
-            if (fullSession && fullSession.messages && fullSession.messages.length > 0) {
-                const first = fullSession.messages[0];
-                const last = fullSession.messages[fullSession.messages.length - 1];
-                if (first && first.text) firstMsg = `First: ${first.sender}: ${first.text.substring(0, 60)}${first.text.length > 60 ? '...' : ''}`;
-                if (last && last.text) lastMsg = `Last: ${last.sender}: ${last.text.substring(0, 60)}${last.text.length > 60 ? '...' : ''}`;
-            }
-        }
-        const firstMsgLabel = new St.Label({
-            text: firstMsg,
-            style_class: 'session-history-item-preview'
-        });
-        const lastMsgLabel = new St.Label({
-            text: lastMsg,
-            style_class: 'session-history-item-preview'
-        });
-        
-        // Preview text (existing summary)
+        // Preview text
         const preview = new St.Label({
             text: session.preview || 'No preview available',
             style_class: 'session-history-item-preview'
@@ -2157,8 +2635,6 @@ class LLMChatBox {
         // Add all components
         item.add_child(headerBox);
         item.add_child(infoRow);
-        if (firstMsg) item.add_child(firstMsgLabel);
-        if (lastMsg) item.add_child(lastMsgLabel);
         item.add_child(preview);
         item.add_child(buttonBox);
         
@@ -2166,10 +2642,10 @@ class LLMChatBox {
     }
     
     // Update _loadSession to switch to chat view after loading
-    _loadSession(sessionId) {
+    async _loadSession(sessionId) {
         log(`[DEBUG] _loadSession called for session: ${sessionId}`);
-        log(`[DEBUG] Stack trace: ` + (new Error()).stack);
-        const sessionData = this._sessionManager.loadSession(sessionId);
+        try {
+            const sessionData = await this._sessionManager.loadSession(sessionId);
         if (!sessionData) {
             log(`Failed to load session: ${sessionId}`);
             return;
@@ -2186,24 +2662,32 @@ class LLMChatBox {
         this._sessionTitle = sessionData.title;
         this._messages = sessionData.messages;
 
-        // Only show chat view, do not render messages here
+            // Show chat view first
         this._showChatView();
 
-        log(`Loaded session: ${sessionId}`);
+            // Render all messages from the loaded session
+            if (sessionData.messages && sessionData.messages.length > 0) {
+                log(`Rendering ${sessionData.messages.length} messages from loaded session`);
+                sessionData.messages.forEach(message => {
+                    this._addMessage(message.text, message.sender, message.isThinking, message.toolResults, false);
+                });
+            }
+
+            log(`Loaded and rendered session: ${sessionId}`);
+        } catch (error) {
+            log(`Error loading session: ${error.message}`);
+        }
     }
 
     _onNewChatButtonClicked() {
         this._startNewSession();
-        // Make sure we show chat view
-        if (this._currentView === 'history') {
             this._showChatView();
-        }
     }
 
-    _startNewSession() {
+    async _startNewSession() {
         // Save current session if it has messages
         if (this._messages.length > 0) {
-            this._saveCurrentSession();
+            await this._saveCurrentSession();
         }
 
         // Clear current session
@@ -2224,7 +2708,7 @@ class LLMChatBox {
         log(`New session started with ID: ${this._sessionId}`);
     }
 
-    _saveCurrentSession() {
+    async _saveCurrentSession() {
         if (this._messages.length === 0) return;
 
         const metadata = {
@@ -2237,7 +2721,12 @@ class LLMChatBox {
             }
         };
 
-        this._sessionManager.saveSession(this._sessionId, this._messages, metadata);
+        try {
+            await this._sessionManager.saveSession(this._sessionId, this._messages, metadata);
+            log(`Session saved successfully: ${this._sessionId}`);
+        } catch (error) {
+            log(`Error saving session: ${error.message}`);
+        }
     }
 
     // Update _addConfirmationMessage to return a Promise that resolves on confirm
@@ -2286,6 +2775,13 @@ class LLMChatBox {
             this._scrollToBottom();
         });
     }
+
+    _showChatView() {
+        this._historyContainer.visible = false;
+        this._chatContainer.visible = true;
+        this._entryText.visible = true;
+        this._currentView = 'chat';
+    }
 }
 
 var LLMChatButton = GObject.registerClass(
@@ -2331,6 +2827,16 @@ class Extension {
 
     enable() {
         this._settings = ExtensionUtils.getSettings('org.gnome.shell.extensions.llmchat');
+        
+        // Set log level based on user preference
+        this._setLogLevel();
+        
+        // Watch for log level changes
+        this._logLevelChangedId = this._settings.connect('changed::log-level', () => {
+            this._setLogLevel();
+        });
+        
+        info('Extension enabled');
         this._button = new LLMChatButton(this._settings);
         Main.panel.addToStatusArea('llm-chat', this._button);
         
@@ -2338,6 +2844,31 @@ class Extension {
         if (this._button._chatBox) {
             this._button._chatBox.clearSession();
         }
+    }
+
+    _setLogLevel() {
+        const logLevelString = this._settings.get_string('log-level');
+        let logLevel;
+        
+        switch (logLevelString) {
+            case 'error':
+                logLevel = Logger.LogLevel.ERROR;
+                break;
+            case 'warn':
+                logLevel = Logger.LogLevel.WARN;
+                break;
+            case 'info':
+                logLevel = Logger.LogLevel.INFO;
+                break;
+            case 'debug':
+                logLevel = Logger.LogLevel.DEBUG;
+                break;
+            default:
+                logLevel = Logger.LogLevel.INFO; // Default fallback
+        }
+        
+        Logger.setLogLevel(logLevel);
+        debug(`Log level set to: ${logLevelString.toUpperCase()}`);
     }
 
     disable() {
@@ -2471,6 +3002,10 @@ class Extension {
         }
 
         if (this._settings) {
+            if (this._logLevelChangedId) {
+                this._settings.disconnect(this._logLevelChangedId);
+                this._logLevelChangedId = null;
+            }
             this._settings = null;
         }
     }

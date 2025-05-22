@@ -10,7 +10,7 @@ class WorkspaceManagementTool extends BaseTool {
     _init() {
         super._init({
             name: 'workspace_management',
-            description: 'Manage workspaces including switching, creating, and removing. Provides detailed application information per workspace.',
+            description: 'Manage workspaces: switch, create, remove, and get application information per workspace.',
             category: 'workspace',
             keywords: ['workspace', 'desktop', 'switch', 'create', 'remove', 'delete', 'list', 'move', 'window', 'app', 'application', 'organize', 'arrange', 'layout', 'space', 'virtual'],
             parameters: {

@@ -115,10 +115,10 @@
     </key>
     <key name="max-context-tokens" type="i">
       <default>2000</default>
+      <range min="500" max="100000" />
       <summary>Maximum tokens for chat context</summary>
       <description>
-        The maximum number of tokens to include in the chat context sent to the LLM. Increase for
-        more context, decrease for performance.
+        The maximum number of tokens to include in the chat context sent to the LLM. Auto-limited by provider capabilities: OpenAI (8k), Anthropic (100k), Gemini (30k), Local models (4k). Higher values provide more context but may be slower.
       </description>
     </key>
     <key name="brave-search-api-key" type="s">
@@ -131,10 +131,26 @@
       <summary>Window States</summary>
       <description>JSON string containing saved window states and positions</description>
     </key>
+    <key name="trigger-reindex" type="b">
+      <default>false</default>
+      <summary>Trigger reindexing of chat history</summary>
+      <description>When enabled, triggers a full reindex of all chat history and search data. Will be automatically disabled after reindexing completes.</description>
+    </key>
     <key name="monitor-states" type="s">
       <default>'[]'</default>
       <summary>Monitor States</summary>
       <description>JSON string containing saved monitor states and layouts</description>
+    </key>
+    <key name="log-level" type="s">
+      <default>'info'</default>
+      <summary>Logging Level</summary>
+      <description>Controls the verbosity of logging output: error (minimal), warn (warnings and errors), info (standard), debug (verbose)</description>
+      <choices>
+        <choice value='error' />
+        <choice value='warn' />
+        <choice value='info' />
+        <choice value='debug' />
+      </choices>
     </key>
   </schema>
 </schemalist>
