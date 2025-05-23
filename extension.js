@@ -960,6 +960,10 @@ class LLMChatBox {
         this._lastSearchQuery = null;
         this._lastSearchUrls = new Map();
         
+        // Add loading state for memory service
+        this._isMemoryServiceLoading = true;
+        this._memoryServiceInitialized = false;
+        
         // Add tool call tracking for loop protection
         this._toolCallCount = 0;
         this._maxToolCalls = 10;
@@ -1124,6 +1128,37 @@ class LLMChatBox {
         inputBox.add_child(buttonBox);  // Add button container to vertical input box
 
         this.actor.add_child(inputBox); // Add the entire input box (entry + buttons) to main actor.
+        
+        // Create loading overlay for memory service initialization
+        this._loadingOverlay = new St.BoxLayout({
+            vertical: true,
+            style_class: 'llm-chat-loading-overlay',
+            x_align: Clutter.ActorAlign.CENTER,
+            y_align: Clutter.ActorAlign.CENTER
+        });
+        
+        const loadingIcon = new St.Icon({
+            icon_name: 'view-refresh-symbolic',
+            icon_size: 24,
+            style_class: 'llm-chat-loading-icon'
+        });
+        
+        const loadingLabel = new St.Label({
+            text: 'Setting up LLM Chat...\nInstalling dependencies and initializing memory service.\nThis may take a few minutes on first run.',
+            style_class: 'llm-chat-loading-label'
+        });
+        loadingLabel.clutter_text.line_wrap = true;
+        loadingLabel.clutter_text.line_wrap_mode = Pango.WrapMode.WORD_CHAR;
+        
+        this._loadingOverlay.add_child(loadingIcon);
+        this._loadingOverlay.add_child(loadingLabel);
+        
+        // Add overlay on top of everything
+        this.actor.add_child(this._loadingOverlay);
+        
+        // Disable input initially
+        this._setInputEnabled(false);
+        
         this._adjustWindowHeight(); // Adjust height on creation.
 
         // Initialize the provider adapter with reference to this chat box
@@ -1172,9 +1207,17 @@ class LLMChatBox {
         
         // Initialize view state
         this._currentView = 'chat'; // possible values: 'chat', 'history'
+        
+        // Start monitoring memory service initialization
+        this._monitorMemoryServiceInitialization();
     }
 
     _onEntryActivated() {
+        // Don't allow sending if memory service is still loading
+        if (this._isMemoryServiceLoading) {
+            return;
+        }
+        
         const text = this._entryText.get_text();
         if (text.trim() !== '') {
             this._sendMessage(text);
@@ -1183,6 +1226,11 @@ class LLMChatBox {
     }
 
     _onSendButtonClicked() {
+        // Don't allow sending if memory service is still loading
+        if (this._isMemoryServiceLoading) {
+            return;
+        }
+        
         const text = this._entryText.get_text();
         if (text.trim() !== '') {
             this._sendMessage(text);
@@ -1265,6 +1313,12 @@ class LLMChatBox {
     }
 
     _sendMessage() {
+        // Don't allow sending if memory service is still loading
+        if (this._isMemoryServiceLoading) {
+            log('Message sending blocked - memory service still loading');
+            return;
+        }
+        
         const message = this._entryText.get_text().trim();
         if (!message) return;
 
@@ -2781,6 +2835,129 @@ Please provide your final answer now using ONLY the tool results above.`;
         this._chatContainer.visible = true;
         this._entryText.visible = true;
         this._currentView = 'chat';
+    }
+
+    _setInputEnabled(enabled) {
+        // For St.Entry, we need to set reactive and can_focus properties
+        this._entryText.set_reactive(enabled);
+        this._entryText.set_can_focus(enabled);
+        
+        // Also set editable on the underlying ClutterText
+        if (this._entryText.clutter_text) {
+            this._entryText.clutter_text.set_editable(enabled);
+        }
+        
+        // Enable/disable all buttons
+        const inputBox = this._entryText.get_parent();
+        if (inputBox && inputBox.get_children().length > 1) {
+            const buttonBox = inputBox.get_children()[1]; // Second child is the button box
+            if (buttonBox) {
+                buttonBox.get_children().forEach(button => {
+                    button.set_reactive(enabled);
+                    if (enabled) {
+                        button.remove_style_class_name('llm-chat-button-disabled');
+                    } else {
+                        button.add_style_class_name('llm-chat-button-disabled');
+                    }
+                });
+            }
+        }
+        
+        if (enabled) {
+            this._entryText.remove_style_class_name('llm-chat-entry-disabled');
+            this._entryText.set_hint_text('Type your message here...');
+        } else {
+            this._entryText.add_style_class_name('llm-chat-entry-disabled');
+            this._entryText.set_hint_text('Please wait while the system initializes...');
+        }
+    }
+
+    _monitorMemoryServiceInitialization() {
+        // Monitor memory service every 500ms
+        const checkInterval = 500;
+        let attempts = 0;
+        const maxAttempts = 600; // 5 minutes timeout
+        
+        const checkMemoryService = () => {
+            attempts++;
+            
+            // Check if we have a global memory service and if it's initialized
+            if (memoryService && memoryService._initialized) {
+                this._onMemoryServiceReady();
+                return false; // Stop the interval
+            }
+            
+            // Check for initialization error
+            if (memoryService && memoryService._initializationError) {
+                this._onMemoryServiceError(memoryService._initializationError);
+                return false; // Stop the interval
+            }
+            
+            // Timeout after maxAttempts
+            if (attempts >= maxAttempts) {
+                this._onMemoryServiceError(new Error('Memory service initialization timeout'));
+                return false; // Stop the interval
+            }
+            
+            // Update loading message based on attempts
+            if (attempts % 10 === 0) { // Update every 5 seconds
+                const minutes = Math.floor(attempts * checkInterval / 60000);
+                if (minutes > 0) {
+                    const loadingLabel = this._loadingOverlay.get_children()[1];
+                    loadingLabel.text = `Setting up LLM Chat...\nInstalling dependencies and initializing memory service.\nTime elapsed: ${minutes} minute${minutes > 1 ? 's' : ''}`;
+                }
+            }
+            
+            return true; // Continue checking
+        };
+        
+        // Start checking
+        GLib.timeout_add(GLib.PRIORITY_DEFAULT, checkInterval, checkMemoryService);
+    }
+
+    _onMemoryServiceReady() {
+        log('Memory service is ready, enabling UI');
+        this._isMemoryServiceLoading = false;
+        this._memoryServiceInitialized = true;
+        
+        // Remove loading overlay
+        if (this._loadingOverlay) {
+            this.actor.remove_child(this._loadingOverlay);
+            this._loadingOverlay = null;
+        }
+        
+        // Enable input
+        this._setInputEnabled(true);
+        
+        // Add a welcome message
+        this._addMessage('✅ LLM Chat is ready! Dependencies installed and memory service initialized successfully.', 'system');
+    }
+
+    _onMemoryServiceError(error) {
+        log(`Memory service initialization failed: ${error.message}`);
+        this._isMemoryServiceLoading = false;
+        this._memoryServiceInitialized = false;
+        
+        // Update loading overlay to show error
+        if (this._loadingOverlay) {
+            const loadingLabel = this._loadingOverlay.get_children()[1];
+            loadingLabel.text = `❌ Setup failed: ${error.message}\n\nThe system can still work with reduced functionality.\nCheck the logs for more details.`;
+            loadingLabel.add_style_class_name('llm-chat-error-label');
+            
+            // Add a retry button
+            const retryButton = new St.Button({
+                style_class: 'llm-chat-button',
+                label: 'Continue Anyway'
+            });
+            retryButton.connect('clicked', () => {
+                this.actor.remove_child(this._loadingOverlay);
+                this._loadingOverlay = null;
+                this._setInputEnabled(true);
+                this._addMessage('⚠️ LLM Chat started with reduced functionality. Memory service is not available.', 'system');
+            });
+            
+            this._loadingOverlay.add_child(retryButton);
+        }
     }
 }
 

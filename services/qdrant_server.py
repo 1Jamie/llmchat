@@ -122,20 +122,60 @@ def load_model():
     """Load the sentence transformer model"""
     global model
     try:
+        # Check NumPy version
+        import numpy as np
+        np_version = np.__version__
+        logger.info(f"NumPy version: {np_version}")
+        
+        # Ensure NumPy version is compatible
+        if not (np_version >= "1.21.6" and np_version < "1.28.0"):
+            raise ImportError(
+                f"NumPy version {np_version} is not compatible. "
+                "Please use NumPy >= 1.21.6 and < 1.28.0. "
+                "You can fix this by running: "
+                "pip install 'numpy>=1.21.6,<1.28.0'"
+            )
+
+        # Check PyTorch version and device
+        import torch
+        logger.info(f"PyTorch version: {torch.__version__}")
+        logger.info(f"CUDA available: {torch.cuda.is_available()}")
+        if torch.cuda.is_available():
+            logger.info(f"CUDA device: {torch.cuda.get_device_name(0)}")
+        
+        # Set device
+        device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        logger.info(f"Using device: {device}")
+
         logger.info(f"Loading model: {model_name}")
-        model = SentenceTransformer(model_name)
-        logger.info("Model loaded successfully")
+        try:
+            model = SentenceTransformer(model_name, device=device)
+            logger.info("Model loaded successfully")
+        except Exception as e:
+            logger.error(f"Error loading model with device {device}: {str(e)}")
+            # Try loading without device specification as fallback
+            logger.info("Attempting to load model without device specification...")
+            model = SentenceTransformer(model_name)
+            logger.info("Model loaded successfully without device specification")
         
         # Ensure collections exist
+        logger.info("Ensuring collections exist...")
         ensure_collection('memories')
         ensure_collection('tools')
         ensure_collection('llm_memories')
         ensure_collection('conversation_history')
+        logger.info("All collections verified")
         
+    except ImportError as e:
+        logger.error(f"Import error loading model: {str(e)}")
+        logger.error(traceback.format_exc())
+        model = None
+        raise
     except Exception as e:
         logger.error(f"Error loading model: {str(e)}")
         logger.error(traceback.format_exc())
         model = None
+        raise
 
 @app.route('/index', methods=['POST'])
 def index_documents():

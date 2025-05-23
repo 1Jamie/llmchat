@@ -107,8 +107,15 @@ var MemoryService = GObject.registerClass({
                 log(`Found Python at: ${pythonPath}`);
                 this._pythonPath = pythonPath;
                 
-                // Check prerequisites asynchronously
-                await this._checkPrerequisites();
+                // Check if we need to install dependencies
+                if (await this._needsDependencyInstallation()) {
+                    log('Dependencies need installation, starting async installation...');
+                    this._startAsyncDependencyInstallation();
+                    
+                    // Wait for dependencies to be installed
+                    await this._waitForDependencyInstallation();
+                    log('Dependencies installation completed');
+                }
                 
                 // Start server asynchronously
                 await this._startServer();
@@ -209,18 +216,13 @@ var MemoryService = GObject.registerClass({
                                         // Check for model loaded message using indexOf
                                         if (strLine.indexOf('Model loaded successfully') !== -1) {
                                             modelLoaded = true;
+                                            this._modelLoaded = true; // Set the instance flag
                                             log('Model loaded successfully');
                                             
                                             // Only resolve if both conditions are met
                                             if (serverUrlFound && modelLoaded) {
-                                                log('Server fully initialized, loading tools...');
-                                                this._loadTools().then(() => {
-                                                    log('Tools loaded successfully');
+                                                log('Server fully initialized');
                                                     resolve();
-                                                }).catch(error => {
-                                                    log(`Error loading tools: ${error.message}`);
-                                                    reject(error);
-                                                });
                                             }
                                         }
                                         
@@ -279,35 +281,286 @@ var MemoryService = GObject.registerClass({
         });
     }
 
-    async _checkPrerequisites() {
+    async _needsDependencyInstallation() {
         try {
-            // Check if Python is available at the specified path
-            const pythonCheck = GLib.spawn_command_line_sync(`${this._pythonPath} --version`);
-            this._pythonAvailable = pythonCheck[0] && pythonCheck[3] === 0;
-            
-            if (this._pythonAvailable) {
-                log(`Python 3 is available at ${this._pythonPath}. Checking for sentence-transformers...`);
+            // Check if virtual environment exists
+            const venvPath = GLib.build_filenamev([Me.path, 'venv']);
+            if (!GLib.file_test(venvPath, GLib.FileTest.EXISTS)) {
+                log('Virtual environment not found');
+                return true;
+            }
+
+            // Check if venv python exists
+            const venvPython = GLib.build_filenamev([Me.path, 'venv', 'bin', 'python3']);
+            if (!GLib.file_test(venvPython, GLib.FileTest.EXISTS)) {
+                log('Virtual environment python not found');
+                return true;
+            }
+
+            // Try to check if dependencies are working
+            try {
+                const checkCmd = `${venvPython} -c "import numpy; import sentence_transformers; print('OK')"`;
+                const [success, stdout, stderr, exitStatus] = GLib.spawn_command_line_sync(checkCmd);
                 
-                // Check if sentence-transformers is installed using the absolute path
-                const [sentenceTransformersCheck, stdout, stderr, exitCode] = GLib.spawn_command_line_sync(
-                    `${this._pythonPath} -c "import sentence_transformers; print('OK')"`
-                );
-                
-                this._modelLoaded = sentenceTransformersCheck && 
-                                   ByteArray.toString(stdout).trim() === 'OK' && 
-                                   exitCode === 0;
-                
-                if (!this._modelLoaded) {
-                    log('sentence-transformers not installed. Will attempt to install...');
-                } else {
-                    log('sentence-transformers is installed.');
+                if (!success || exitStatus !== 0 || !stdout || stdout.toString().indexOf('OK') === -1) {
+                    log('Dependencies check failed, need installation');
+                    return true;
                 }
+                
+                log('Dependencies appear to be working');
+                this._pythonPath = venvPython; // Set the venv python path
+                return false;
+            } catch (e) {
+                log(`Error checking dependencies: ${e.message}`);
+                return true;
+            }
+        } catch (error) {
+            log(`Error in _needsDependencyInstallation: ${error.message}`);
+            return true;
+        }
+    }
+
+    async _waitForDependencyInstallation() {
+        return new Promise((resolve, reject) => {
+            let attempts = 0;
+            const maxAttempts = 300; // Wait up to 5 minutes for CPU-only packages
+            
+            const checkInstallation = () => {
+                attempts++;
+                
+                // Check if dependencies are now working
+                const venvPython = GLib.build_filenamev([Me.path, 'venv', 'bin', 'python3']);
+                if (GLib.file_test(venvPython, GLib.FileTest.EXISTS)) {
+                    try {
+                        const checkCmd = `${venvPython} -c "import numpy; import sentence_transformers; print('OK')"`;
+                        const [success, stdout, stderr, exitStatus] = GLib.spawn_command_line_sync(checkCmd);
+                        
+                        if (success && exitStatus === 0 && stdout && stdout.toString().indexOf('OK') !== -1) {
+                            log('Dependencies installation verified');
+                            this._pythonPath = venvPython; // Set the venv python path
+                            resolve();
+                            return;
+                        }
+                    } catch (e) {
+                        // Continue checking
+                    }
+                }
+                
+                if (attempts >= maxAttempts) {
+                    reject(new Error('Dependency installation timeout after 5 minutes'));
+                    return;
+                }
+                
+                // Check again in 1 second
+                GLib.timeout_add(GLib.PRIORITY_DEFAULT, 1000, () => {
+                    checkInstallation();
+                    return GLib.SOURCE_REMOVE;
+                });
+            };
+            
+            checkInstallation();
+        });
+    }
+
+    _startAsyncDependencyInstallation() {
+        // Create virtual environment if it doesn't exist
+        const venvPath = GLib.build_filenamev([Me.path, 'venv']);
+        if (!GLib.file_test(venvPath, GLib.FileTest.EXISTS)) {
+            log('Creating virtual environment...');
+            this._runAsyncCommand(
+                `${this._pythonPath} -m venv ${venvPath}`,
+                () => {
+                    log('Virtual environment created successfully');
+                    this._upgradePip();
+                },
+                (error) => {
+                    log(`Failed to create virtual environment: ${error}`);
+                }
+            );
+        } else {
+            this._upgradePip();
+        }
+    }
+
+    _upgradePip() {
+        const venvPython = GLib.build_filenamev([Me.path, 'venv', 'bin', 'python3']);
+        log('Upgrading pip...');
+        this._runAsyncCommand(
+            `${venvPython} -m pip install --upgrade pip`,
+            () => {
+                log('Pip upgraded successfully');
+                this._installNumpy();
+            },
+            (error) => {
+                log(`Failed to upgrade pip: ${error}`);
+            }
+        );
+    }
+
+    _installNumpy() {
+        const venvPython = GLib.build_filenamev([Me.path, 'venv', 'bin', 'python3']);
+        log('Installing compatible NumPy version...');
+        this._runAsyncCommand(
+            `${venvPython} -m pip install 'numpy>=1.21.6,<1.28.0'`,
+            () => {
+                log('NumPy installed successfully');
+                this._installDependencies();
+            },
+            (error) => {
+                log(`Failed to install NumPy: ${error}`);
+            }
+        );
+    }
+
+    _installDependencies() {
+        const venvPython = GLib.build_filenamev([Me.path, 'venv', 'bin', 'python3']);
+        
+        log('Installing CPU-only PyTorch first...');
+        // Install CPU-only PyTorch first to avoid CUDA dependencies
+        this._runAsyncCommand(
+            `${venvPython} -m pip install torch>=2.0.0,<2.5.0 --index-url https://download.pytorch.org/whl/cpu`,
+            () => {
+                log('CPU-only PyTorch installed successfully');
+                this._installOtherDependencies();
+            },
+            (error) => {
+                log(`Failed to install PyTorch: ${error}`);
+                // Try with a simpler approach
+                this._runAsyncCommand(
+                    `${venvPython} -m pip install torch --index-url https://download.pytorch.org/whl/cpu`,
+                    () => {
+                        log('CPU-only PyTorch installed successfully (fallback)');
+                        this._installOtherDependencies();
+                    },
+                    (error) => {
+                        log(`Failed to install PyTorch (fallback): ${error}`);
+                    }
+                );
+            }
+        );
+    }
+
+    _installOtherDependencies() {
+        const venvPython = GLib.build_filenamev([Me.path, 'venv', 'bin', 'python3']);
+        const requirementsPath = GLib.build_filenamev([Me.path, 'requirements.txt']);
+        
+        if (GLib.file_test(requirementsPath, GLib.FileTest.EXISTS)) {
+            log('Installing other dependencies...');
+            this._runAsyncCommand(
+                `${venvPython} -m pip install --no-cache-dir --upgrade -r ${requirementsPath}`,
+                (output) => {
+                    log(`Other dependencies installed successfully:\n${output}`);
+                    this._verifyInstallation();
+                },
+                (error) => {
+                    log(`Failed to install other dependencies: ${error}`);
+                    // Try without the --no-cache-dir flag as fallback
+                    this._runAsyncCommand(
+                        `${venvPython} -m pip install --upgrade -r ${requirementsPath}`,
+                        (output) => {
+                            log(`Other dependencies installed successfully (fallback):\n${output}`);
+                            this._verifyInstallation();
+                        },
+                        (error) => {
+                            log(`Failed to install other dependencies (fallback): ${error}`);
+                        }
+                    );
+                }
+            );
+                } else {
+            log('No requirements.txt found, skipping other dependencies installation');
+            this._verifyInstallation();
+        }
+    }
+
+    _verifyInstallation() {
+        const venvPython = GLib.build_filenamev([Me.path, 'venv', 'bin', 'python3']);
+        log('Verifying installation...');
+        this._runAsyncCommand(
+            `${venvPython} -c "import numpy; print(f'NumPy version: {numpy.__version__}'); import sentence_transformers; print('OK')"`,
+            (output) => {
+                log(`Installation verified successfully:\n${output}`);
+                this._pythonPath = venvPython;
+                // Don't start server here - let the main initialization flow handle it
+                log('Dependencies installation completed successfully');
+            },
+            (error) => {
+                log(`Failed to verify installation: ${error}`);
+            }
+        );
+    }
+
+    _runAsyncCommand(command, onSuccess, onError) {
+        try {
+            const [success, pid, stdin, stdout, stderr] = GLib.spawn_async_with_pipes(
+                null, // working directory
+                ['/bin/sh', '-c', command], // command
+                null, // environment
+                GLib.SpawnFlags.SEARCH_PATH | GLib.SpawnFlags.DO_NOT_REAP_CHILD,
+                null // child setup function
+            );
+
+            if (!success) {
+                onError('Failed to start command');
+                return;
+            }
+
+            // Set up output monitoring
+            const stdoutStream = new Gio.DataInputStream({
+                base_stream: new Gio.UnixInputStream({ fd: stdout }),
+                close_base_stream: true
+            });
+
+            const stderrStream = new Gio.DataInputStream({
+                base_stream: new Gio.UnixInputStream({ fd: stderr }),
+                close_base_stream: true
+            });
+
+            let stdoutData = '';
+            let stderrData = '';
+
+            const readStream = (stream, data, isStdout) => {
+                stream.read_line_async(GLib.PRIORITY_DEFAULT, null, (stream, res) => {
+                    try {
+                        const [line] = stream.read_line_finish(res);
+                        if (line) {
+                            const strLine = ByteArray.toString(line);
+                            if (isStdout) {
+                                stdoutData += strLine + '\n';
+                                log(`Command output: ${strLine}`);
             } else {
-                throw new Error(`Python 3 is not available at ${this._pythonPath}`);
+                                stderrData += strLine + '\n';
+                                log(`Command error: ${strLine}`);
+                            }
+                            readStream(stream, data, isStdout);
+                        } else {
+                            // End of stream
+                            if (isStdout) {
+                                stream.close(null);
+                            } else {
+                                // Both streams are done, check process exit
+                                GLib.child_watch_add(GLib.PRIORITY_DEFAULT, pid, (pid, status) => {
+                                    if (status === 0) {
+                                        onSuccess(stdoutData);
+                                    } else {
+                                        onError(stderrData || 'Command failed');
+                                    }
+                                    GLib.spawn_close_pid(pid);
+                                });
+                            }
             }
         } catch (e) {
-            logError(e, `Error checking prerequisites: ${e.message}`);
-            throw e;
+                        log(`Error reading ${isStdout ? 'stdout' : 'stderr'}: ${e.message}`);
+                    }
+                });
+            };
+
+            readStream(stdoutStream, stdoutData, true);
+            readStream(stderrStream, stderrData, false);
+
+        } catch (e) {
+            log(`Error running async command: ${e.message}`);
+            onError(e.message);
         }
     }
 
@@ -399,7 +652,7 @@ var MemoryService = GObject.registerClass({
                 message.request_headers.append('Content-Type', 'application/json');
                 const payload = JSON.stringify({
                     query: '',
-                    top_k: 1000,
+                    top_k: 1000, // Large number to get all tools
                     namespace: 'tools'
                 });
                 message.set_request_body_from_bytes('application/json', new GLib.Bytes(payload));
