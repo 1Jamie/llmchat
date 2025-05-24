@@ -12,14 +12,136 @@ class ToolLoader extends GObject.Object {
         this._tools = new Map();
         this._memoryService = null;
         this._availableTools = [];
+        this._toolsDir = null;
+    }
+
+    initialize(toolsPath) {
+        if (!toolsPath) {
+            throw new Error('Tools path is required for initialization');
+        }
+        this._toolsDir = toolsPath;
+        log(`ToolLoader initialized with path: ${toolsPath}`);
     }
 
     setMemoryService(memoryService) {
         this._memoryService = memoryService;
+        if (memoryService) {
+            memoryService.addInitializationListener(() => {
+                this._loadTools();
+            });
+        }
     }
 
     getMemoryService() {
         return this._memoryService;
+    }
+
+    async _loadTools() {
+        if (!this._memoryService || !this._memoryService._initialized) {
+            log('Memory service not ready, deferring tool loading');
+            return;
+        }
+
+        try {
+            // Load tool descriptions from memory service first
+            const memoryDescriptions = await this._getToolDescriptions();
+            if (memoryDescriptions && memoryDescriptions.length > 0) {
+                log(`Loaded ${memoryDescriptions.length} tool descriptions from memory service`);
+                await this._indexToolDescriptions(memoryDescriptions);
+                return;
+            }
+
+            // If no descriptions found in memory service, load from local files
+            const toolsDir = Gio.File.new_for_path(this._toolsDir);
+            if (!toolsDir.query_exists(null)) {
+                log(`Tools directory does not exist: ${this._toolsDir}`);
+                return;
+            }
+
+            const enumerator = toolsDir.enumerate_children('standard::name', Gio.FileQueryInfoFlags.NONE, null);
+            let fileInfo;
+            const localDescriptions = [];
+
+            while ((fileInfo = enumerator.next_file(null))) {
+                const fileName = fileInfo.get_name();
+                if (fileName.endsWith('.js') && fileName !== 'BaseTool.js') {
+                    const toolPath = `${this._toolsDir}/${fileName}`;
+                    try {
+                        const toolModule = await import(toolPath);
+                        if (toolModule.default && toolModule.default.prototype instanceof BaseTool) {
+                            const tool = new toolModule.default();
+                            if (tool.getDescription) {
+                                const description = tool.getDescription();
+                                localDescriptions.push(description);
+                            }
+                        }
+                    } catch (e) {
+                        log(`Error loading tool ${fileName}: ${e.message}`);
+                    }
+                }
+            }
+
+            if (localDescriptions.length > 0) {
+                log(`Loaded ${localDescriptions.length} tool descriptions from local files`);
+                await this._indexToolDescriptions(localDescriptions);
+            } else {
+                log('No tool descriptions found in local files');
+            }
+        } catch (e) {
+            log(`Error in _loadTools: ${e.message}`);
+        }
+    }
+
+    async _indexToolDescriptions(descriptions) {
+        if (!this._memoryService || !this._memoryService._initialized) {
+            log('Memory service not ready, cannot index tool descriptions');
+            return;
+        }
+
+        try {
+            // Clear existing tool descriptions
+            await this._memoryService.clearNamespace('tools');
+
+            // Index each tool description
+            for (const description of descriptions) {
+                try {
+                    await this._memoryService.indexMemory({
+                        text: description.description,
+                        metadata: {
+                            type: 'tool_description',
+                            name: description.name,
+                            category: description.category || 'general',
+                            parameters: description.parameters || {}
+                        },
+                        namespace: 'tools'
+                    });
+                } catch (e) {
+                    log(`Error indexing tool description for ${description.name}: ${e.message}`);
+                }
+            }
+            log('Successfully indexed tool descriptions');
+        } catch (e) {
+            log(`Error in _indexToolDescriptions: ${e.message}`);
+        }
+    }
+
+    async _getToolDescriptions() {
+        if (!this._memoryService || !this._memoryService._initialized) {
+            log('Memory service not ready, cannot get tool descriptions');
+            return [];
+        }
+
+        try {
+            // Try to get tool descriptions from memory service
+            const descriptions = await this._memoryService.getRelevantToolDescriptions('all tools', 100);
+            if (descriptions && descriptions.length > 0) {
+                return descriptions;
+            }
+            return [];
+        } catch (e) {
+            log(`Error getting tool descriptions: ${e.message}`);
+            return [];
+        }
     }
 
     loadTools() {

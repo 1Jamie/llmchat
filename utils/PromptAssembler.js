@@ -88,7 +88,7 @@ Current time: ${currentTime}
 Remember: Always use tools when you need current information that you cannot provide from your training data.`;
     }
 
-    assembleMessages(text, relevantToolsPrompt, chatBox = null) {
+    async assembleMessages(text, relevantToolsPrompt, chatBox = null, memoryService = null) {
         // Get provider-specific context window limits
         const provider = this._settings.get_string('service-provider');
         const userMaxTokens = this._settings.get_int('max-context-tokens') || 2000;
@@ -129,6 +129,75 @@ Remember: Always use tools when you need current information that you cannot pro
         
         // Initialize messages array with system message
         const messages = [systemMessage];
+
+        // Try to retrieve relevant memories if memory service is available
+        let memoryContext = '';
+        if (memoryService) {
+            try {
+                log(`[Memory] Memory service available, checking initialization: ${!!memoryService._initialized}`);
+                debug(`[Memory] Retrieving relevant memories for query: ${text.substring(0, 50)}...`);
+                const relevantMemories = await memoryService.getRelevantMemories(text, 3);
+                
+                log(`[Memory] Retrieved memories: ${JSON.stringify(relevantMemories)}`);
+                
+                if (relevantMemories && (relevantMemories.conversation_history?.length > 0 || relevantMemories.llm_memories?.length > 0)) {
+                    // Combine both types of memories
+                    const allMemories = [
+                        ...(relevantMemories.conversation_history || []),
+                        ...(relevantMemories.llm_memories || [])
+                    ];
+                    
+                    log(`[Memory] Combined memories count: ${allMemories.length}`);
+                    
+                    // Sort by relevance and take top memories that fit in context
+                    allMemories.sort((a, b) => (b.relevance || 0) - (a.relevance || 0));
+                    
+                    let memoryText = '';
+                    let memoryTokens = 0;
+                    const maxMemoryTokens = Math.floor(remainingTokens * 0.3); // Use up to 30% of remaining tokens for memories
+                    
+                    debug(`[Memory] Processing ${allMemories.length} memories, max tokens: ${maxMemoryTokens}`);
+                    
+                    for (const memory of allMemories) {
+                        const formattedMemory = this._formatSingleMemory(memory);
+                        const memoryTokensEstimate = this._estimateTokens(formattedMemory, provider);
+                        
+                        log(`[Memory] Memory: ${memory.text.substring(0, 50)}... (${memoryTokensEstimate} tokens)`);
+                        
+                        if (memoryTokens + memoryTokensEstimate <= maxMemoryTokens) {
+                            memoryText += formattedMemory + '\n\n';
+                            memoryTokens += memoryTokensEstimate;
+                        } else {
+                            log(`[Memory] Skipping memory due to token limit`);
+                            break; // Stop adding memories if we exceed token limit
+                        }
+                    }
+                    
+                    if (memoryText.trim()) {
+                        memoryContext = `\n\nRELEVANT MEMORIES:\n${memoryText}Use this context to inform your response, but only reference it when directly relevant to the user's query.\n\n`;
+                        remainingTokens -= memoryTokens;
+                        debug(`[Memory] Added ${memoryTokens} tokens of memory context`);
+                        log(`[Memory] Final memory context length: ${memoryContext.length} chars`);
+                    } else {
+                        log(`[Memory] No memory text generated despite having memories`);
+                    }
+                } else {
+                    log(`[Memory] No relevant memories found or empty response structure`);
+                }
+            } catch (error) {
+                log(`[Memory] Error retrieving memories: ${error.message}`);
+                log(`[Memory] Error stack: ${error.stack}`);
+                // Continue without memories if retrieval fails
+            }
+        } else {
+            log(`[Memory] No memory service provided to PromptAssembler`);
+        }
+
+        // Add memory context to system message if available
+        if (memoryContext) {
+            systemMessage.content += memoryContext;
+            systemTokens = this._estimateTokens(systemMessage.content, provider);
+        }
 
         // Add user message
         messages.push({
@@ -199,6 +268,44 @@ Remember: Always use tools when you need current information that you cannot pro
         }
 
         return messages;
+    }
+
+    _formatSingleMemory(memory) {
+        const currentTime = new Date();
+        let context = `MEMORY: ${memory.text}\n`;
+        
+        // Add relevance score if available
+        if (memory.relevance) {
+            const relevancePercent = Math.round(memory.relevance * 100);
+            context += `RELEVANCE: ${relevancePercent}%\n`;
+        }
+        
+        // Add age information if available
+        if (memory.context?.created_at || memory.context?.timestamp) {
+            const createdDate = new Date(memory.context.created_at || memory.context.timestamp);
+            const ageInHours = Math.round((currentTime - createdDate) / (1000 * 60 * 60));
+            
+            if (ageInHours < 24) {
+                context += `AGE: ${ageInHours} hours ago\n`;
+            } else {
+                const ageInDays = Math.round(ageInHours / 24);
+                context += `AGE: ${ageInDays} days ago\n`;
+            }
+        }
+        
+        // Add expiration info for volatile data
+        if (memory.context?.is_volatile && memory.context?.expires_at) {
+            const expiresDate = new Date(memory.context.expires_at);
+            const isExpired = currentTime > expiresDate;
+            
+            if (isExpired) {
+                context += `STATUS: ⚠️ EXPIRED - UPDATE NEEDED\n`;
+            } else {
+                context += `STATUS: ✓ VALID\n`;
+            }
+        }
+        
+        return context;
     }
 
     // Convert messages to provider-specific format

@@ -1,0 +1,6 @@
+numpy>=1.21.6,<1.28.0
+sentence-transformers>=2.2.2
+flask>=2.0.1
+qdrant-client>=1.1.1
+torch>=2.0.0
+requests>=2.31.0

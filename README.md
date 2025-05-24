@@ -108,6 +108,8 @@ The extension includes a robust memory system for persistent storage and retriev
 - Efficient vector similarity search
 - Autonomous memory creation by the LLM
 - Context token management for conversation history
+- Local LLM-based memory extraction using Qwen model
+- Automatic memory categorization and tagging
 
 #### Implementation
 - Local Qdrant server for vector storage
@@ -116,6 +118,17 @@ The extension includes a robust memory system for persistent storage and retriev
 - Tool system integration
 - LLM-driven memory creation
 - Configurable context window size
+- Local llama.cpp integration for memory processing
+- Qwen 0.6B model for efficient memory extraction
+
+#### Memory Processing
+The system uses a local Qwen model to process and extract memories:
+- Automatic extraction of important information
+- Fact and preference identification
+- Context-aware memory creation
+- Importance level determination
+- Automatic tagging of memories
+- JSON-structured memory format
 
 #### Memory Creation
 The LLM autonomously creates memories based on user interactions:
@@ -125,18 +138,17 @@ The LLM autonomously creates memories based on user interactions:
 - User preferences and settings
 - Significant conversation context
 
-The LLM uses a dedicated memory tool to store information:
+The memory processing system uses a dedicated endpoint to extract and store information:
 ```json
 {
-  "tool": "add_memory",
-  "arguments": {
+  "memories": [
+    {
     "text": "Memory content",
-    "context": {
-      "type": "memory_type",
+      "type": "fact/preference/context/decision",
       "importance": "high/normal/low",
       "tags": ["relevant", "tags"]
     }
-  }
+  ]
 }
 ```
 

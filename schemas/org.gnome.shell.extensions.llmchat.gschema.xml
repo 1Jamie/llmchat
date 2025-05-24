@@ -45,6 +45,15 @@
       <summary>Gemini Temperature</summary>
       <description>Controls randomness: lower values make the output more deterministic (0.0-2.0).</description>
     </key>
+    <key name="gemini-model" type="s">
+      <default>'gemini-2.0-flash-001'</default>
+      <summary>Gemini Model</summary>
+      <description>The model to use for Gemini (e.g., gemini-2.0-flash-001, gemini-pro).</description>
+      <choices>
+        <choice value='gemini-2.0-flash-001' />
+        <choice value='gemini-pro' />
+      </choices>
+    </key>
     <key name="anthropic-api-key" type="s">
       <default>''</default>
       <summary>Anthropic API Key</summary>
@@ -104,7 +113,6 @@
     </key>
     <key name="ollama-temperature" type="d">
       <default>0.7</default>
-      <range min="0.0" max="2.0" />
       <summary>Ollama Temperature</summary>
       <description>Controls randomness: lower values make the output more deterministic (0.0-2.0).</description>
     </key>
@@ -150,6 +158,16 @@
         <choice value='warn' />
         <choice value='info' />
         <choice value='debug' />
+      </choices>
+    </key>
+    <key name="memory-verbosity" type="s">
+      <default>'balanced'</default>
+      <summary>Memory System Verbosity</summary>
+      <description>Controls the verbosity and aggressiveness of the memory system: quiet (minimal logging, fewer memories), balanced (moderate), verbose (detailed logging, more memories)</description>
+      <choices>
+        <choice value='quiet' />
+        <choice value='balanced' />
+        <choice value='verbose' />
       </choices>
     </key>
   </schema>

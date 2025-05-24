@@ -25,23 +25,25 @@ const _httpSession = new Soup.Session();
 let memoryService = null;
 try {
     memoryService = MemoryService.getInstance();
-    // Start initialization asynchronously only if not already initialized
-    if (!memoryService._initialized) {
+    // Start initialization asynchronously
         GLib.timeout_add(GLib.PRIORITY_DEFAULT, 0, () => {
-            memoryService._startInitialization().catch(e => {
+        memoryService.initialize().catch(e => {
                 log(`Error starting memory system initialization: ${e.message}`);
             });
             return GLib.SOURCE_REMOVE;
         });
-    }
 } catch (e) {
     log(`Error creating memory service: ${e.message}`);
 }
 
-// Initialize tool loader
+// Initialize tool loader after memory service
 const toolLoader = new ToolLoader();
+if (memoryService) {
 toolLoader.setMemoryService(memoryService);
-toolLoader.loadTools();
+}
+
+// Initialize session manager after memory service
+const sessionManager = new SessionManager();
 
 // Provider Adapter class to handle different AI providers
 class ProviderAdapter {
@@ -49,6 +51,9 @@ class ProviderAdapter {
         this._settings = settings;
         this._chatBox = chatBox;
         this._promptAssembler = new PromptAssembler(settings);
+        this._memoryServiceUrl = 'http://127.0.0.1:5000';
+        // Pass the global memory service instance to the provider adapter
+        this._memoryService = memoryService;
     }
     
     async _initializeMemorySystem() {
@@ -76,6 +81,51 @@ class ProviderAdapter {
         return this._initializationPromise;
     }
 
+    async _processMessageForMemory(chatId, query, response, provider) {
+        if (!this._memoryService) {
+            log('Memory service not initialized');
+            return;
+        }
+
+        // Only process memories after a complete exchange
+        if (!response) {
+            return;
+        }
+
+        // Determine if this memory is important enough to store
+        const importance = await this._memoryService.determineMemoryImportance(query, response);
+        if (importance < 0.5) {
+            log('Memory not important enough to store');
+                                return;
+                            }
+
+        // Create memory object with context
+        const memory = {
+            text: `${query}\n\n${response}`,
+                                        context: {
+                                            timestamp: new Date().toISOString(),
+                conversation_id: chatId,
+                query: query,
+                provider: provider,
+                metadata: {
+                    importance: importance,
+                    type: 'conversation'
+                }
+                                        }
+                                    };
+                                    
+        try {
+            const result = await this._memoryService.indexMemory(memory);
+            if (result.status === 'success') {
+                log('Successfully stored memory');
+                        } else {
+                log(`Failed to store memory: ${result.error || 'Unknown error'}`);
+                        }
+                    } catch (error) {
+            log(`Failed to store memory: ${error.message}`);
+        }
+    }
+
     // Common interface for all providers
     async makeRequest(text, toolCalls = null) {
         // Ensure memory system is initialized before proceeding
@@ -97,36 +147,8 @@ class ProviderAdapter {
         }
         
         try {
-            // Extract just the user's query from the conversation history
-            const userQuery = text.split('\n').filter(line => line.startsWith('User: ')).pop()?.replace('User: ', '') || text;
-            
-            let relevantToolsPrompt = '';
-            let relevantMemories = [];
-            
-            if (memoryService && memoryService._initialized) {
-                try {
-                    // Step 1: Get relevant tools
-                    const relevantTools = await memoryService.getRelevantToolDescriptions(userQuery);
-                    relevantToolsPrompt = relevantTools; // Pass the entire result object
-                    toolCalls = relevantTools.functions; // Use the functions array for function calls
-                    
-                    // Step 2: Get relevant LLM memories only (not conversation history)
-                    const llmMemories = await memoryService._getLLMMemories(userQuery, 3);
-                    
-                    // Step 3: Filter and categorize LLM memories by freshness
-                    if (llmMemories.length > 0) {
-                        const { validMemories, expiredMemories } = this._categorizeMemoriesByFreshness(llmMemories);
-                        
-                        if (validMemories.length > 0 || expiredMemories.length > 0) {
-                            const memoryContext = this._formatMemoryContext([...validMemories, ...expiredMemories]);
-                            text = `${text}\n\nRelevant memories from previous conversations:\n${memoryContext}`;
-                        }
-                    }
-                } catch (e) {
-                    log(`Error retrieving relevant tools or memories: ${e.message}`);
-                    // If memory service fails, we'll proceed without the relevant tools/memories
-                }
-            }
+            // Get relevant tools for the query
+            const relevantToolsPrompt = await this._getRelevantToolsPrompt(text);
             
             let response;
             switch (provider) {
@@ -149,10 +171,12 @@ class ProviderAdapter {
                     throw new Error(`Unknown provider: ${provider}`);
             }
             
-            // Remove automatic memory storage
             return response;
         } catch (error) {
-            log(`Error in makeRequest: ${error.message}`);
+            log(`Error in makeRequest: ${error.message || 'Unknown error'}`);
+            if (error.stack) {
+                log(`Error stack: ${error.stack}`);
+            }
             throw error;
         }
     }
@@ -253,61 +277,61 @@ class ProviderAdapter {
     _determineMemoryImportance(query, response) {
         const text = `${query} ${response}`.toLowerCase();
         
-        // Patterns for volatile/temporary information that should not be stored long-term
-        const volatilePatterns = [
-            // System state patterns - completely avoid these
-            /(?:ip address|directory|current time|current date|system load|memory usage|cpu usage|disk space|process list|running processes)/i,
-            /(?:file list|directory contents|folder contents|ls output|dir output)/i,
-            /(?:window layout|workspace layout|screen layout|display configuration)/i,
-            /(?:current session|active session|user session|login session)/i,
-            
-            // System command outputs - completely avoid these
-            /(?:command output|terminal output|console output|shell output)/i,
-            /(?:search results|query results|filtered results|sorted results)/i,
-            /(?:error log|system log|application log|debug log)/i,
-            
-            // File system operations - completely avoid these
-            /(?:file operation|directory operation|file system|file listing|directory listing)/i,
-            /(?:file content|file contents|file data|file information)/i,
-            
-            // Network and connectivity - completely avoid these
+        // Patterns for information that should be stored as short-term volatile (hours)
+        const shortTermVolatilePatterns = [
+            // System state that changes frequently but might be useful short-term
+            /(?:current time|current date|system load|memory usage|cpu usage|disk space)/i,
+            /(?:process list|running processes|active processes)/i,
             /(?:network status|connection status|connectivity|network state)/i,
             /(?:active connection|current connection|network connection)/i,
             
-            // Process and system monitoring - completely avoid these
-            /(?:process status|system status|monitoring data|performance data)/i,
-            /(?:resource usage|system resources|hardware status)/i
-        ];
-
-        // Check for completely volatile content that should never be stored
-        for (const pattern of volatilePatterns) {
-            if (pattern.test(text)) {
-                log(`Detected non-storable volatile content: ${pattern}`);
-                return { importance: 'none', expiration_hours: null };
-            }
-        }
-
-        // Patterns for short-term volatile information that should expire quickly
-        const shortTermVolatilePatterns = [
             // Current activities and temporary states
-            /(?:currently working on|currently debugging|right now|at the moment|today)/i,
+            /(?:currently working on|currently debugging|right now|at the moment)/i,
             /(?:temporary|temp|cache|cached|dynamic content)/i,
             /(?:this session|this conversation|current task)/i,
-            /(?:weather today|current weather|today's weather)/i,
+            /(?:weather today|current weather|today's weather|weather forecast)/i,
             /(?:debugging|troubleshooting|investigating)/i,
             
             // Daily context
             /(?:today|this morning|this afternoon|this evening)/i,
-            /(?:daily|daily task|daily routine)/i
+            /(?:daily|daily task|daily routine)/i,
+            
+            // Search and query results that might be useful short-term
+            /(?:search results|query results|web search|found information)/i,
+            /(?:fetched content|retrieved data|web content)/i
         ];
 
-        // Patterns for medium-term context (weekly/project-based)
+        // Patterns for information that should be stored as medium-term volatile (days/weeks)
         const mediumTermVolatilePatterns = [
             /(?:this week|this project|current project|working on project)/i,
             /(?:weekly|weekly goal|this sprint|current sprint)/i,
             /(?:learning|studying|course|class)/i,
-            /(?:job search|interview|application)/i
+            /(?:job search|interview|application)/i,
+            /(?:recent events|recent news|current events)/i,
+            /(?:temporary settings|project settings|session settings)/i
         ];
+
+        // Patterns for information that should be avoided completely (truly noise)
+        const noisePatterns = [
+            // System command outputs and logs that are just noise
+            /(?:command output|terminal output|console output|shell output)(?:\s+|:).*error/i,
+            /(?:error log|system log|application log|debug log)(?:\s+|:).*(?:failed|error)/i,
+            
+            // File system operations that are just structural
+            /(?:file operation|directory operation|file system|file listing|directory listing)(?:\s+|:).*(?:create|delete|move)/i,
+            /(?:window layout|workspace layout|screen layout|display configuration)(?:\s+|:).*changed/i,
+            
+            // Session management noise
+            /(?:session|user session|login session)(?:\s+|:).*(?:started|ended|expired)/i
+        ];
+
+        // Check for truly noisy content that shouldn't be stored
+        for (const pattern of noisePatterns) {
+            if (pattern.test(text)) {
+                log(`Detected noisy content, not storing: ${pattern}`);
+                return { importance: 'none', expiration_hours: null };
+            }
+        }
 
         // Patterns for persistent information that should be stored permanently
         const persistentPatterns = [
@@ -329,22 +353,26 @@ class ProviderAdapter {
             
             // Skills and expertise - permanent
             /(?:skill|expertise|experience|background|profession|job title)/i,
-            /(?:programming language|technology|framework|tool preference)/i
+            /(?:programming language|technology|framework|tool preference)/i,
+            
+            // Facts and knowledge - permanent
+            /(?:fact|information|knowledge|learned|discovered|found out)/i,
+            /(?:remember|note|important|significant|useful)/i
         ];
 
-        // Check for short-term volatile content (24 hours)
+        // Check for short-term volatile content (6 hours for very dynamic info)
         for (const pattern of shortTermVolatilePatterns) {
             if (pattern.test(text)) {
-                log(`Detected short-term volatile content: ${pattern}`);
-                return { importance: 'normal', expiration_hours: 24 };
+                log(`Detected short-term volatile content, storing for 6 hours: ${pattern}`);
+                return { importance: 'normal', expiration_hours: 6 };
             }
         }
 
-        // Check for medium-term volatile content (1 week)
+        // Check for medium-term volatile content (3 days for contextual info)
         for (const pattern of mediumTermVolatilePatterns) {
             if (pattern.test(text)) {
-                log(`Detected medium-term volatile content: ${pattern}`);
-                return { importance: 'normal', expiration_hours: 168 }; // 1 week
+                log(`Detected medium-term volatile content, storing for 3 days: ${pattern}`);
+                return { importance: 'normal', expiration_hours: 72 }; // 3 days
             }
         }
 
@@ -404,7 +432,14 @@ class ProviderAdapter {
             }
         }
         
-        // Default: don't store if not clearly persistent or temporarily relevant
+        // Default: Store as medium-term volatile if it seems like conversation content
+        // This is much less restrictive - we'll store most conversation content
+        if (text.length > 20 && (query.length > 5 || response.length > 5)) {
+            log(`Storing conversation content as medium-term volatile (24 hours)`);
+            return { importance: 'normal', expiration_hours: 24 };
+        }
+        
+        // Only reject very short or empty content
         return { importance: 'none', expiration_hours: null };
     }
 
@@ -678,7 +713,7 @@ class ProviderAdapter {
     }
 
     // Update LlamaCPP request method to use shared processing and include relevant tools
-    _makeLlamaRequest(text, toolCalls, relevantToolsPrompt, chatBox = null) {
+    async _makeLlamaRequest(text, toolCalls, relevantToolsPrompt, chatBox = null) {
         const serverUrl = this._settings.get_string('llama-server-url');
         if (!serverUrl) {
             throw new Error('Llama server URL is not set');
@@ -687,8 +722,8 @@ class ProviderAdapter {
         const modelName = this._settings.get_string('llama-model-name') || 'llama';
         const temperature = this._settings.get_double('llama-temperature');
 
-        // Use centralized message assembly
-        const messages = this._promptAssembler.assembleMessages(text, relevantToolsPrompt, chatBox);
+        // Use centralized message assembly with memory service
+        const messages = await this._promptAssembler.assembleMessages(text, relevantToolsPrompt, chatBox, this._memoryService);
 
         // Create the request payload
         const payload = {
@@ -744,7 +779,7 @@ class ProviderAdapter {
     }
 
     // Provider-specific request implementations with relevant tools support
-    _makeOpenAIRequest(text, toolCalls, relevantToolsPrompt, chatBox = null) {
+    async _makeOpenAIRequest(text, toolCalls, relevantToolsPrompt, chatBox = null) {
         const apiKey = this._settings.get_string('openai-api-key');
         if (!apiKey) {
             throw new Error('OpenAI API key is not set');
@@ -753,8 +788,8 @@ class ProviderAdapter {
         const model = this._settings.get_string('openai-model');
         const temperature = this._settings.get_double('openai-temperature');
 
-        // Use centralized message assembly
-        const messages = this._promptAssembler.assembleMessages(text, relevantToolsPrompt, chatBox);
+        // Use centralized message assembly with memory service
+        const messages = await this._promptAssembler.assembleMessages(text, relevantToolsPrompt, chatBox, this._memoryService);
 
         const requestData = {
             model: model,
@@ -802,48 +837,98 @@ class ProviderAdapter {
         });
     }
 
-    _makeGeminiRequest(text, toolCalls, relevantToolsPrompt, chatBox = null) {
+    async _makeGeminiRequest(text, toolCalls, relevantToolsPrompt, chatBox = null) {
         const apiKey = this._settings.get_string('gemini-api-key');
         if (!apiKey) {
             throw new Error('Gemini API key is not set');
         }
 
-        // Use centralized message assembly
-        const messages = this._promptAssembler.assembleMessages(text, relevantToolsPrompt, chatBox);
+        // Use centralized message assembly with memory service
+        const messages = await this._promptAssembler.assembleMessages(text, relevantToolsPrompt, chatBox, this._memoryService);
         const formattedPrompt = this._promptAssembler.formatForProvider(messages, 'gemini');
         
         const requestData = {
             contents: [{
-                parts: [{ text: formattedPrompt }]
-            }]
+                parts: [{
+                    text: formattedPrompt
+                }]
+            }],
+            generationConfig: {
+                temperature: this._settings.get_double('gemini-temperature'),
+                topK: 40,
+                topP: 0.95,
+                maxOutputTokens: 2048,
+            }
         };
 
-        debug(`Making Gemini request with tool support. Model: gemini-pro, temp: ${this._settings.get_double('gemini-temperature')}`);
-        debug(`Tool configuration passed via system prompt: ${toolCalls ? toolCalls.length : 0} tools available`);
+        const model = this._settings.get_string('gemini-model') || 'gemini-2.0-flash-001';
+        log(`Making Gemini request with tool support. Model: ${model}, temp: ${this._settings.get_double('gemini-temperature')}`);
+        log(`Tool configuration passed via system prompt: ${toolCalls ? toolCalls.length : 0} tools available`);
+        log(`Request data: ${JSON.stringify(requestData)}`);
 
-        const message = Soup.Message.new('POST', `https://generativelanguage.googleapis.com/v1beta/models/gemini-pro:generateContent?key=${apiKey}`);
+        const message = Soup.Message.new('POST', `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${apiKey}`);
         message.request_headers.append('Content-Type', 'application/json');
         message.set_request_body_from_bytes('application/json', new GLib.Bytes(JSON.stringify(requestData)));
 
         return new Promise((resolve, reject) => {
             _httpSession.queue_message(message, (session, msg) => {
+                try {
+                    const responseText = msg.response_body.data;
+                    log(`Gemini API response status: ${msg.status_code}`);
+                    log(`Gemini API response: ${responseText}`);
+
                 if (msg.status_code !== 200) {
-                    reject(`Gemini API error: ${msg.status_code}`);
+                        let errorMessage = 'Unknown error';
+                        try {
+                            const errorData = JSON.parse(responseText);
+                            errorMessage = errorData.error?.message || errorData.error?.details?.[0]?.message || 'Unknown error';
+                        } catch (e) {
+                            errorMessage = responseText;
+                        }
+                        reject(new Error(`Gemini API error (${msg.status_code}): ${errorMessage}`));
                     return;
                 }
-                try {
-                    const response = JSON.parse(msg.response_body.data);
+
+                    const response = JSON.parse(responseText);
+                    
+                    // Validate response structure
+                    if (!response.candidates || !response.candidates[0] || !response.candidates[0].content) {
+                        log(`Invalid response format: ${JSON.stringify(response)}`);
+                        reject(new Error('Invalid response format from Gemini API'));
+                        return;
+                    }
+                    
+                    // Extract the text from the response
+                    const text = response.candidates[0].content.parts[0].text;
+                    if (!text) {
+                        log(`Empty response text: ${JSON.stringify(response)}`);
+                        reject(new Error('Empty response from Gemini API'));
+                        return;
+                    }
+                    
+                    log(`Successfully extracted response text: ${text.substring(0, 100)}...`);
+                    
                     // Use shared processing method
-                    const processed = this._processToolResponse(response);
+                    const processed = this._processToolResponse({
+                        choices: [{
+                            message: {
+                                content: text
+                            }
+                        }]
+                    });
                     resolve(processed);
                 } catch (error) {
-                    reject(`Error parsing Gemini response: ${error.message}`);
+                    log(`Error in Gemini request: ${error.message}`);
+                    if (error.stack) {
+                        log(`Error stack: ${error.stack}`);
+                    }
+                    reject(error);
                 }
             });
         });
     }
 
-    _makeAnthropicRequest(text, toolCalls, relevantToolsPrompt, chatBox = null) {
+    async _makeAnthropicRequest(text, toolCalls, relevantToolsPrompt, chatBox = null) {
         const apiKey = this._settings.get_string('anthropic-api-key');
         if (!apiKey) {
             throw new Error('Anthropic API key is not set');
@@ -853,8 +938,8 @@ class ProviderAdapter {
         const temperature = this._settings.get_double('anthropic-temperature');
         const maxTokens = this._settings.get_int('anthropic-max-tokens');
 
-        // Use centralized message assembly
-        const messages = this._promptAssembler.assembleMessages(text, relevantToolsPrompt, chatBox);
+        // Use centralized message assembly with memory service
+        const messages = await this._promptAssembler.assembleMessages(text, relevantToolsPrompt, chatBox, this._memoryService);
         const formattedPrompt = this._promptAssembler.formatForProvider(messages, 'anthropic');
 
         const requestData = {
@@ -891,7 +976,7 @@ class ProviderAdapter {
         });
     }
 
-    _makeOllamaRequest(text, toolCalls, relevantToolsPrompt, chatBox = null) {
+    async _makeOllamaRequest(text, toolCalls, relevantToolsPrompt, chatBox = null) {
         const serverUrl = this._settings.get_string('ollama-server-url');
         if (!serverUrl) {
             throw new Error('Ollama server URL is not set');
@@ -900,8 +985,8 @@ class ProviderAdapter {
         const modelName = this._settings.get_string('ollama-model-name') || 'llama2';
         const temperature = this._settings.get_double('ollama-temperature');
 
-        // Use centralized message assembly
-        const messages = this._promptAssembler.assembleMessages(text, relevantToolsPrompt, chatBox);
+        // Use centralized message assembly with memory service
+        const messages = await this._promptAssembler.assembleMessages(text, relevantToolsPrompt, chatBox, this._memoryService);
         const formattedPrompt = this._promptAssembler.formatForProvider(messages, 'ollama');
         
         const requestData = {
@@ -946,6 +1031,30 @@ class ProviderAdapter {
 
     // Remove the old _assembleMessages method since it's now in PromptAssembler
     // ... existing code ...
+
+    async _getRelevantToolsPrompt(text) {
+        // If no tools are available, return empty string
+        if (!this._chatBox || !this._chatBox._availableTools || this._chatBox._availableTools.length === 0) {
+            return '';
+        }
+
+        // Get the available tools from the chat box
+        const tools = this._chatBox._availableTools;
+        
+        // Create a prompt that describes the available tools
+        let prompt = 'Available tools:\n';
+        tools.forEach(tool => {
+            prompt += `- ${tool.name}: ${tool.description}\n`;
+            if (tool.parameters && tool.parameters.properties) {
+                prompt += '  Parameters:\n';
+                Object.entries(tool.parameters.properties).forEach(([param, details]) => {
+                    prompt += `    - ${param}: ${details.description || 'No description'}\n`;
+                });
+            }
+        });
+        
+        return prompt;
+    }
 }
 
 class LLMChatBox {
@@ -959,6 +1068,10 @@ class LLMChatBox {
         this._lastSearchResults = null;
         this._lastSearchQuery = null;
         this._lastSearchUrls = new Map();
+        
+        // Add loading state for memory service
+        this._isMemoryServiceLoading = true;
+        this._memoryServiceInitialized = false;
         
         // Add tool call tracking for loop protection
         this._toolCallCount = 0;
@@ -1124,6 +1237,37 @@ class LLMChatBox {
         inputBox.add_child(buttonBox);  // Add button container to vertical input box
 
         this.actor.add_child(inputBox); // Add the entire input box (entry + buttons) to main actor.
+        
+        // Create loading overlay for memory service initialization
+        this._loadingOverlay = new St.BoxLayout({
+            vertical: true,
+            style_class: 'llm-chat-loading-overlay',
+            x_align: Clutter.ActorAlign.CENTER,
+            y_align: Clutter.ActorAlign.CENTER
+        });
+        
+        const loadingIcon = new St.Icon({
+            icon_name: 'view-refresh-symbolic',
+            icon_size: 24,
+            style_class: 'llm-chat-loading-icon'
+        });
+        
+        const loadingLabel = new St.Label({
+            text: 'Setting up LLM Chat...\nInstalling dependencies and initializing memory service.\nThis may take a few minutes on first run.',
+            style_class: 'llm-chat-loading-label'
+        });
+        loadingLabel.clutter_text.line_wrap = true;
+        loadingLabel.clutter_text.line_wrap_mode = Pango.WrapMode.WORD_CHAR;
+        
+        this._loadingOverlay.add_child(loadingIcon);
+        this._loadingOverlay.add_child(loadingLabel);
+        
+        // Add overlay on top of everything
+        this.actor.add_child(this._loadingOverlay);
+        
+        // Disable input initially
+        this._setInputEnabled(false);
+        
         this._adjustWindowHeight(); // Adjust height on creation.
 
         // Initialize the provider adapter with reference to this chat box
@@ -1172,9 +1316,17 @@ class LLMChatBox {
         
         // Initialize view state
         this._currentView = 'chat'; // possible values: 'chat', 'history'
+        
+        // Start monitoring memory service initialization
+        this._monitorMemoryServiceInitialization();
     }
 
     _onEntryActivated() {
+        // Don't allow sending if memory service is still loading
+        if (this._isMemoryServiceLoading) {
+            return;
+        }
+        
         const text = this._entryText.get_text();
         if (text.trim() !== '') {
             this._sendMessage(text);
@@ -1183,6 +1335,11 @@ class LLMChatBox {
     }
 
     _onSendButtonClicked() {
+        // Don't allow sending if memory service is still loading
+        if (this._isMemoryServiceLoading) {
+            return;
+        }
+        
         const text = this._entryText.get_text();
         if (text.trim() !== '') {
             this._sendMessage(text);
@@ -1264,84 +1421,73 @@ class LLMChatBox {
         }
     }
 
-    _sendMessage() {
-        const message = this._entryText.get_text().trim();
-        if (!message) return;
+    async _sendMessage(text) {
+        if (!text.trim()) return;
 
-        // Clear input
-        this._entryText.set_text('');
-
-        // Reset tool call tracking between user messages
-        // This allows fresh tool calls for each new user query
-        this._toolCallCount = 0;
-        this._recentToolCalls = [];
-
-        // Add user message
-        this._addMessage(message, 'user');
-
-        // Save session after each message
-        this._saveCurrentSession();
-
-        // Add thinking message if not hidden
-        if (!this._settings.get_boolean('hide-thinking')) {
-            this._addMessage('Thinking...', 'assistant', true);
-        }
-
-        // Pass just the user message - conversation history will be handled in _assembleMessages
-        const userMessage = message;
+        // Store the user's query for memory processing
+        this._lastUserQuery = text;
         
-        // Log the tool calling state and available tools
-        // Only log tool availability changes, not every request
-        const toolCount = this.toolLoader.getTools().length;
-        if (!this._lastToolCount || this._lastToolCount !== toolCount) {
-            info(`Tool calling enabled (${toolCount} tools available)`);
-            this._lastToolCount = toolCount;
-        }
+        // Add user message to UI
+        this._addMessage(text, 'user');
 
-        // Make the API request using the provider adapter - always enable tool calls
-        this._providerAdapter.makeRequest(userMessage, true)
-            .then(response => {
-                log(`Received response from API: text length=${response.text ? response.text.length : 0}, tool calls=${response.toolCalls ? response.toolCalls.length : 0}`);
-                
-                // Check for tool calls
-                if (response.toolCalls && response.toolCalls.length > 0) {
-                    log(`Processing ${response.toolCalls.length} tool calls`);
+        // Add to messages array
+        this._messages.push({
+            role: 'user',
+            content: text
+        });
+        
+        // Show thinking indicator
+        this._addMessage('Thinking...', 'system', true);
+        
+        try {
+            // Get response from provider
+            const response = await this._providerAdapter.makeRequest(text);
                     
-                    // Remove thinking message before showing tool call processing
-                    if (!this._settings.get_boolean('hide-thinking')) {
+            // Remove thinking indicator
                         const children = this._messageContainer.get_children();
                         const lastChild = children[children.length - 1];
                         if (lastChild && lastChild._isThinking) {
                             this._messageContainer.remove_child(lastChild);
-                        }
                     }
                     
+            // Process the response
+            if (response.toolCalls && response.toolCalls.length > 0) {
+                // Handle tool calls
                     this._handleToolCalls(response.toolCalls, response.text);
                 } else {
-                    // Remove thinking message if it exists
-                    if (!this._settings.get_boolean('hide-thinking')) {
+                // No tool calls, just show the text response
+                this._addMessage(response.text, 'ai');
+                
+                // Process memories for the complete exchange
+                const fullExchangeText = `User Query: ${text}\n\nAI Response: ${response.text}`;
+                const context = {
+                    query: text,
+                    provider: this._settings.get_string('service-provider'),
+                    conversation_history: this._getConversationHistory(),
+                    is_complete_exchange: true
+                };
+                
+                // Process the memory asynchronously
+                this._providerAdapter._processMessageForMemory(fullExchangeText, context)
+                    .then(memories => {
+                        if (memories && memories.length > 0) {
+                            log(`Processed ${memories.length} memories for the exchange`);
+                        }
+                    })
+                    .catch(error => {
+                        log(`Error processing memories: ${error.message}`);
+                    });
+            }
+        } catch (error) {
+            // Remove thinking indicator if it exists
                         const children = this._messageContainer.get_children();
                         const lastChild = children[children.length - 1];
                         if (lastChild && lastChild._isThinking) {
                             this._messageContainer.remove_child(lastChild);
-                        }
                     }
                     
-                    this._addMessage(response.text, 'ai');
-                }
-            })
-            .catch(error => {
-                // Remove thinking message if it exists
-                if (!this._settings.get_boolean('hide-thinking')) {
-                    const children = this._messageContainer.get_children();
-                    const lastChild = children[children.length - 1];
-                    if (lastChild && lastChild._isThinking) {
-                        this._messageContainer.remove_child(lastChild);
-                    }
-                }
-                
-                this._addMessage(`Error: ${error.message}`, 'ai');
-            });
+                this._addMessage(`Error: ${error.message}`, 'system');
+        }
     }
 
     _handleToolCalls(toolCalls, originalResponse) {
@@ -1688,6 +1834,16 @@ Please provide your final answer now using ONLY the tool results above.`;
                             } else {
                                 // No tool calls, just show the text response
                                 this._addMessage(response.text || "I've processed the tool results.", 'ai');
+                                
+                                // Process memories only for the final response with no tool calls
+                                const fullExchangeText = `User Query: ${this._lastUserQuery}\n\nAI Response: ${response.text}`;
+                                const context = {
+                                    query: this._lastUserQuery,
+                                    provider: this._settings.get_string('service-provider'),
+                                    conversation_history: this._getConversationHistory(),
+                                    is_complete_exchange: true
+                                };
+                                this._providerAdapter._processMessageForMemory(fullExchangeText, context);
                                 
                                 // Reset counters
                                 this._toolCallCount = 0;
@@ -2086,37 +2242,7 @@ Please provide your final answer now using ONLY the tool results above.`;
             textLabel.clutter_text.single_line_mode = false;
             mainContent.add_child(textLabel);
 
-            // Add message linking UI
-            if (sender === 'ai') {
-                const linkBox = new St.BoxLayout({
-                    vertical: false,
-                    style_class: 'llm-chat-message-links'
-                });
 
-                // Add "Link to Previous" button if not first message
-                if (this._messages.length > 1) {
-                    const linkButton = new St.Button({
-                        style_class: 'llm-chat-link-button',
-                        label: 'Link to Previous'
-                    });
-                    linkButton.connect('clicked', () => {
-                        this._linkToPreviousMessage(message);
-                    });
-                    linkBox.add_child(linkButton);
-                }
-
-                // Add "Find Related" button
-                const findRelatedButton = new St.Button({
-                    style_class: 'llm-chat-link-button',
-                    label: 'Find Related'
-                });
-                findRelatedButton.connect('clicked', () => {
-                    this._findRelatedMessages(message);
-                });
-                linkBox.add_child(findRelatedButton);
-
-                mainContent.add_child(linkBox);
-            }
 
             // Add sources if this is an AI message with tool results
             if (sender === 'ai' && toolResults) {
@@ -2189,51 +2315,9 @@ Please provide your final answer now using ONLY the tool results above.`;
         }
     }
 
-    _linkToPreviousMessage(message) {
-        // Find the previous AI message
-        const prevMessageIndex = this._messages.findIndex(m => m === message) - 1;
-        if (prevMessageIndex >= 0) {
-            const prevMessage = this._messages[prevMessageIndex];
-            if (prevMessage.sender === 'ai') {
-                // Add a visual link between messages
-                const linkMessage = {
-                    text: `Linked to previous message about: ${prevMessage.text.substring(0, 50)}...`,
-                    sender: 'system',
-                    timestamp: new Date().toISOString(),
-                    isThinking: false,
-                    toolResults: null
-                };
-                this._addMessage(linkMessage.text, linkMessage.sender, false, null, true);
-            }
-        }
-    }
 
-    async _findRelatedMessages(message) {
-        try {
-            // Use memory service to find semantically related messages
-            const relatedMessages = await this._memoryService.getRelevantMemories(message.text, 3);
-            
-            if (relatedMessages.length > 0) {
-                const relatedText = relatedMessages.map(m => 
-                    `Related message: ${m.text.substring(0, 100)}...`
-                ).join('\n');
-                
-                const linkMessage = {
-                    text: `Found related messages:\n${relatedText}`,
-                    sender: 'system',
-                    timestamp: new Date().toISOString(),
-                    isThinking: false,
-                    toolResults: null
-                };
-                this._addMessage(linkMessage.text, linkMessage.sender, false, null, true);
-            } else {
-                this._addMessage('No related messages found.', 'system', false, null, true);
-            }
-        } catch (error) {
-            log(`Error finding related messages: ${error.message}`);
-            this._addMessage('Error finding related messages.', 'system', false, null, true);
-        }
-    }
+
+
 
     _extractSources(toolResults) {
         const sources = [];
@@ -2781,6 +2865,206 @@ Please provide your final answer now using ONLY the tool results above.`;
         this._chatContainer.visible = true;
         this._entryText.visible = true;
         this._currentView = 'chat';
+    }
+
+    _setInputEnabled(enabled) {
+        // For St.Entry, we need to set reactive and can_focus properties
+        this._entryText.set_reactive(enabled);
+        this._entryText.set_can_focus(enabled);
+        
+        // Also set editable on the underlying ClutterText
+        if (this._entryText.clutter_text) {
+            this._entryText.clutter_text.set_editable(enabled);
+        }
+        
+        // Enable/disable all buttons
+        const inputBox = this._entryText.get_parent();
+        if (inputBox && inputBox.get_children().length > 1) {
+            const buttonBox = inputBox.get_children()[1]; // Second child is the button box
+            if (buttonBox) {
+                buttonBox.get_children().forEach(button => {
+                    button.set_reactive(enabled);
+                    if (enabled) {
+                        button.remove_style_class_name('llm-chat-button-disabled');
+                    } else {
+                        button.add_style_class_name('llm-chat-button-disabled');
+                    }
+                });
+            }
+        }
+        
+        if (enabled) {
+            this._entryText.remove_style_class_name('llm-chat-entry-disabled');
+            this._entryText.set_hint_text('Type your message here...');
+        } else {
+            this._entryText.add_style_class_name('llm-chat-entry-disabled');
+            this._entryText.set_hint_text('Please wait while the system initializes...');
+        }
+    }
+
+    _monitorMemoryServiceInitialization() {
+        // Monitor memory service every 500ms
+        const checkInterval = 500;
+        let attempts = 0;
+        const maxAttempts = 600; // 5 minutes timeout
+        
+        const checkMemoryService = () => {
+            attempts++;
+            
+            // Add debug logging
+            log(`[UI Monitor] Attempt ${attempts}: memoryService exists: ${!!memoryService}, initialized: ${memoryService?._initialized}, error: ${!!memoryService?._initializationError}`);
+            
+            // Check if we have a global memory service and if it's initialized
+            if (memoryService && memoryService._initialized) {
+                log('[UI Monitor] Memory service detected as initialized, triggering ready callback');
+                this._onMemoryServiceReady();
+                return false; // Stop the interval
+            }
+            
+            // Check for initialization error
+            if (memoryService && memoryService._initializationError) {
+                log('[UI Monitor] Memory service error detected, triggering error callback');
+                this._onMemoryServiceError(memoryService._initializationError);
+                return false; // Stop the interval
+            }
+            
+            // Timeout after maxAttempts
+            if (attempts >= maxAttempts) {
+                log('[UI Monitor] Timeout reached, triggering timeout error');
+                this._onMemoryServiceError(new Error('Memory service initialization timeout'));
+                return false; // Stop the interval
+            }
+            
+            // Update loading message based on attempts
+            if (attempts % 10 === 0) { // Update every 5 seconds
+                const minutes = Math.floor(attempts * checkInterval / 60000);
+                if (minutes > 0) {
+                    const loadingLabel = this._loadingOverlay.get_children()[1];
+                    loadingLabel.text = `Setting up LLM Chat...\nInstalling dependencies and initializing memory service.\nTime elapsed: ${minutes} minute${minutes > 1 ? 's' : ''}`;
+                }
+            }
+            
+            return true; // Continue checking
+        };
+        
+        // Start checking
+        log('[UI Monitor] Starting memory service monitoring');
+        GLib.timeout_add(GLib.PRIORITY_DEFAULT, checkInterval, checkMemoryService);
+    }
+
+    _onMemoryServiceReady() {
+        log('Memory service is ready, enabling UI');
+        this._isMemoryServiceLoading = false;
+        this._memoryServiceInitialized = true;
+        
+        // Initialize the provider adapter now that memory service is ready
+        if (this._providerAdapter) {
+            this._providerAdapter._initializeMemorySystem().then(() => {
+                log('ProviderAdapter initialized successfully');
+            }).catch(e => {
+                log(`Error initializing ProviderAdapter: ${e.message}`);
+            });
+        }
+        
+        // Remove loading overlay
+        if (this._loadingOverlay) {
+            this.actor.remove_child(this._loadingOverlay);
+            this._loadingOverlay = null;
+        }
+        
+        // Enable input
+        this._setInputEnabled(true);
+        
+        // Add a welcome message
+        this._addMessage('✅ LLM Chat is ready! Dependencies installed and memory service initialized successfully.', 'system');
+    }
+
+    _onMemoryServiceError(error) {
+        log(`Memory service initialization failed: ${error.message}`);
+        this._isMemoryServiceLoading = false;
+        this._memoryServiceInitialized = false;
+        
+        // Update loading overlay to show error
+        if (this._loadingOverlay) {
+            const loadingLabel = this._loadingOverlay.get_children()[1];
+            loadingLabel.text = `❌ Setup failed: ${error.message}\n\nThe system can still work with reduced functionality.\nCheck the logs for more details.`;
+            loadingLabel.add_style_class_name('llm-chat-error-label');
+            
+            // Add a retry button
+            const retryButton = new St.Button({
+                style_class: 'llm-chat-button',
+                label: 'Continue Anyway'
+            });
+            retryButton.connect('clicked', () => {
+                this.actor.remove_child(this._loadingOverlay);
+                this._loadingOverlay = null;
+                this._setInputEnabled(true);
+                this._addMessage('⚠️ LLM Chat started with reduced functionality. Memory service is not available.', 'system');
+            });
+            
+            this._loadingOverlay.add_child(retryButton);
+        }
+    }
+
+    _initializeMemorySystem() {
+        if (this._memoryService) {
+            return;
+        }
+
+        this._memoryService = new MemoryService();
+        
+        // Connect to memory service signals
+        this._memoryService.connect('server-error', (service, error) => {
+            this._showSystemMessage(`Memory system error: ${error.message}`);
+        });
+        
+        this._memoryService.connect('dependency-installation', (service, data) => {
+            this._showSystemMessage(`Memory system: ${data.message}`);
+        });
+        
+        this._memoryService.connect('server-ready', () => {
+            this._showSystemMessage('Memory system initialized');
+        });
+
+        // First check and install dependencies, then initialize the service
+        this._memoryService.checkAndInstallDependencies()
+            .then(() => {
+                // Only initialize after dependencies are installed
+                return this._memoryService.initialize();
+            })
+            .catch(error => {
+                this._showSystemMessage(`Failed to initialize memory system: ${error.message}`);
+            });
+    }
+
+    _showSystemMessage(message) {
+        const messageBox = new Gtk.Box({
+            orientation: Gtk.Orientation.HORIZONTAL,
+            spacing: 8,
+            margin_top: 8,
+            margin_bottom: 8,
+            margin_start: 8,
+            margin_end: 8
+        });
+
+        const icon = new Gtk.Image({
+            icon_name: 'system-run-symbolic',
+            pixel_size: 16
+        });
+
+        const label = new Gtk.Label({
+            label: message,
+            wrap: true,
+            wrap_mode: Gtk.WrapMode.WORD,
+            hexpand: true,
+            xalign: 0
+        });
+
+        messageBox.append(icon);
+        messageBox.append(label);
+
+        this._chatBox.append(messageBox);
+        this._scrollToBottom();
     }
 }
 

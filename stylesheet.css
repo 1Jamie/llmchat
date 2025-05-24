@@ -13,6 +13,7 @@
   flex-direction: column; 
   resize: vertical;
   overflow: hidden;
+  position: relative; /* For absolute positioning of overlay */
 }
 
 /* Scroll View */
@@ -503,4 +504,53 @@
 
 .llm-chat-box > StBoxLayout.llm-chat-input-box { /* Ensure the input box is a direct child for flex purposes */
     /* No changes needed here, already defined above */
+}
+
+/* Loading Overlay */
+.llm-chat-loading-overlay {
+  position: absolute;
+  top: 0;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  background-color: rgba(50, 50, 50, 0.95);
+  border-radius: 8px;
+  padding: 40px;
+  z-index: 1000;
+}
+
+.llm-chat-loading-icon {
+  margin-bottom: 20px;
+  color: #3584e4;
+  animation: spin 2s linear infinite;
+}
+
+.llm-chat-loading-label {
+  color: #ffffff;
+  text-align: center;
+  font-size: 16px;
+  line-height: 1.4;
+}
+
+.llm-chat-error-label {
+  color: #e74c3c;
+}
+
+/* Disabled input states */
+.llm-chat-entry-disabled {
+  background-color: rgba(30, 30, 30, 0.9);
+  color: #888;
+  border-color: #444;
+}
+
+.llm-chat-button-disabled {
+  background-color: rgba(60, 60, 60, 0.5);
+  color: #666;
+  border-color: #444;
+}
+
+/* Animations */
+@keyframes spin {
+  from { transform: rotate(0deg); }
+  to { transform: rotate(360deg); }
 }

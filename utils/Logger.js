@@ -15,13 +15,49 @@ let currentLogLevel = LogLevel.INFO; // Default to INFO level
 // Get the log file path
 const logFile = Gio.File.new_for_path(`${Me.path}/debug.log`);
 
+// Track repeated messages to avoid spam
+const messageCounts = new Map();
+const MESSAGE_THRESHOLD = 3; // Number of identical messages before suppressing
+const MESSAGE_WINDOW = 5000; // Time window in ms to track repeated messages
+
 // Internal logging function
 function _writeLog(level, levelName, message) {
     if (level > currentLogLevel) {
         return; // Skip if level is higher than current setting
     }
     
+    // Skip license-related messages
+    if (message.toLowerCase().includes('license') || 
+        message.toLowerCase().includes('copyright') ||
+        message.toLowerCase().includes('terms and conditions')) {
+        return;
+    }
+    
     const timestamp = new Date().toLocaleTimeString();
+    
+    // Check for repeated messages
+    const now = Date.now();
+    const key = `${levelName}:${message}`;
+    const lastSeen = messageCounts.get(key);
+    
+    if (lastSeen) {
+        if (now - lastSeen.time < MESSAGE_WINDOW) {
+            lastSeen.count++;
+            if (lastSeen.count > MESSAGE_THRESHOLD) {
+                // Skip logging if too many repeats
+                return;
+            }
+            if (lastSeen.count === MESSAGE_THRESHOLD) {
+                message = `${message} (repeated ${lastSeen.count} times)`;
+            }
+        } else {
+            // Reset counter if outside time window
+            messageCounts.set(key, { time: now, count: 1 });
+        }
+    } else {
+        messageCounts.set(key, { time: now, count: 1 });
+    }
+    
     const formattedMessage = `[${timestamp}] [${levelName}] ${message}`;
     
     // Log to console

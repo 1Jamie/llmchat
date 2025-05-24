@@ -89,6 +89,28 @@ function fillPreferencesWindow(window) {
         Gio.SettingsBindFlags.DEFAULT
     );
 
+    // Memory System Verbosity setting
+    const memoryVerbosityRow = new Adw.ActionRow({
+        title: 'Memory System Verbosity',
+        subtitle: 'Controls the verbosity and aggressiveness of the memory system'
+    });
+    const memoryVerbosityCombo = new Gtk.ComboBoxText();
+    memoryVerbosityCombo.append('quiet', 'Quiet (Minimal logging, fewer memories)');
+    memoryVerbosityCombo.append('balanced', 'Balanced (Moderate)');
+    memoryVerbosityCombo.append('verbose', 'Verbose (Detailed logging, more memories)');
+    memoryVerbosityCombo.set_active_id(settings.get_string('memory-verbosity') || 'balanced');
+    
+    // Connect combo to setting
+    memoryVerbosityCombo.connect('changed', () => {
+        const activeId = memoryVerbosityCombo.get_active_id();
+        if (activeId) {
+            settings.set_string('memory-verbosity', activeId);
+        }
+    });
+    
+    memoryVerbosityRow.add_suffix(memoryVerbosityCombo);
+    memoryGroup.add(memoryVerbosityRow);
+
     // OpenAI API Key entry
     const openaiBox = new Adw.ActionRow({
         title: 'OpenAI API Key'
