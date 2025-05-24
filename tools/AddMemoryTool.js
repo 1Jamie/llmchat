@@ -37,7 +37,7 @@ class AddMemoryTool extends BaseTool {
 
             // Prepare the memory data
             const memoryData = {
-                namespace: 'memories',
+                namespace: context?.type === 'conversation' ? 'llm_memories' : 'memories',
                 documents: [{
                     id: Date.now().toString(),
                     text: text,

@@ -1,6 +1,6 @@
 'use strict';
 
-const { GObject, Gio } = imports.gi;
+const { GObject, Gio, GLib } = imports.gi;
 const ExtensionUtils = imports.misc.extensionUtils;
 const Me = ExtensionUtils.getCurrentExtension();
 const { BaseTool } = Me.imports.utils.BaseTool;
@@ -42,53 +42,63 @@ class ToolLoader extends GObject.Object {
             return;
         }
 
+        // Wait a bit for the model to be fully loaded after initialization
+        await new Promise(resolve => {
+            setTimeout(resolve, 2000); // Use setTimeout instead of GLib.timeout_add
+        });
+
         try {
-            // Load tool descriptions from memory service first
-            const memoryDescriptions = await this._getToolDescriptions();
-            if (memoryDescriptions && memoryDescriptions.length > 0) {
-                log(`Loaded ${memoryDescriptions.length} tool descriptions from memory service`);
-                await this._indexToolDescriptions(memoryDescriptions);
-                return;
+            // First, make sure we have tools loaded locally
+            if (this._tools.size === 0) {
+                log('No tools loaded locally, calling loadTools first');
+                this.loadTools();
             }
 
-            // If no descriptions found in memory service, load from local files
-            const toolsDir = Gio.File.new_for_path(this._toolsDir);
-            if (!toolsDir.query_exists(null)) {
-                log(`Tools directory does not exist: ${this._toolsDir}`);
-                return;
+            // Get currently indexed tools
+            let indexedTools = new Set();
+            try {
+                const memoryDescriptions = await this._getToolDescriptions();
+                if (memoryDescriptions && memoryDescriptions.length > 0) {
+                    log(`Found ${memoryDescriptions.length} tool descriptions already in memory service`);
+                    indexedTools = new Set(memoryDescriptions.map(d => d.name));
+                }
+            } catch (e) {
+                log(`Could not check existing tools in memory (model may still be loading): ${e.message}`);
+                // Continue with loading anyway
             }
 
-            const enumerator = toolsDir.enumerate_children('standard::name', Gio.FileQueryInfoFlags.NONE, null);
-            let fileInfo;
-            const localDescriptions = [];
-
-            while ((fileInfo = enumerator.next_file(null))) {
-                const fileName = fileInfo.get_name();
-                if (fileName.endsWith('.js') && fileName !== 'BaseTool.js') {
-                    const toolPath = `${this._toolsDir}/${fileName}`;
-                    try {
-                        const toolModule = await import(toolPath);
-                        if (toolModule.default && toolModule.default.prototype instanceof BaseTool) {
-                            const tool = new toolModule.default();
-                            if (tool.getDescription) {
-                                const description = tool.getDescription();
-                                localDescriptions.push(description);
-                            }
-                        }
-                    } catch (e) {
-                        log(`Error loading tool ${fileName}: ${e.message}`);
-                    }
+            // Convert our loaded tools to descriptions for indexing
+            const toolDescriptions = [];
+            for (const tool of this._tools.values()) {
+                if (!tool.name || !tool.description) {
+                    log(`Skipping tool with missing name or description: ${JSON.stringify(tool)}`);
+                    continue;
+                }
+                
+                // Only add tools that aren't already indexed
+                if (!indexedTools.has(tool.name)) {
+                    log(`Tool ${tool.name} is not indexed, will be added`);
+                    toolDescriptions.push({
+                        name: tool.name,
+                        description: tool.description,
+                        category: tool.category || 'general',
+                        parameters: tool.parameters || {},
+                        keywords: tool.keywords || []
+                    });
+                } else {
+                    log(`Tool ${tool.name} is already indexed, skipping`);
                 }
             }
 
-            if (localDescriptions.length > 0) {
-                log(`Loaded ${localDescriptions.length} tool descriptions from local files`);
-                await this._indexToolDescriptions(localDescriptions);
+            if (toolDescriptions.length > 0) {
+                log(`Loading ${toolDescriptions.length} new tool descriptions into memory service`);
+                await this._indexToolDescriptions(toolDescriptions);
             } else {
-                log('No tool descriptions found in local files');
+                log('No new tool descriptions to load into memory');
             }
         } catch (e) {
             log(`Error in _loadTools: ${e.message}`);
+            log(`Stack trace: ${e.stack}`);
         }
     }
 
@@ -99,27 +109,11 @@ class ToolLoader extends GObject.Object {
         }
 
         try {
-            // Clear existing tool descriptions
-            await this._memoryService.clearNamespace('tools');
-
-            // Index each tool description
-            for (const description of descriptions) {
-                try {
-                    await this._memoryService.indexMemory({
-                        text: description.description,
-                        metadata: {
-                            type: 'tool_description',
-                            name: description.name,
-                            category: description.category || 'general',
-                            parameters: description.parameters || {}
-                        },
-                        namespace: 'tools'
-                    });
-                } catch (e) {
-                    log(`Error indexing tool description for ${description.name}: ${e.message}`);
-                }
-            }
-            log('Successfully indexed tool descriptions');
+            log(`Indexing ${descriptions.length} tool descriptions into memory service`);
+            
+            // Use the memory service's loadToolDescriptions method
+            await this._memoryService.loadToolDescriptions(descriptions);
+            log('Successfully indexed tool descriptions into memory service');
         } catch (e) {
             log(`Error in _indexToolDescriptions: ${e.message}`);
         }
@@ -158,6 +152,10 @@ class ToolLoader extends GObject.Object {
                         const toolModule = Me.imports.tools[toolName];
                         if (toolModule && toolModule.Tool) {
                             const tool = new toolModule.Tool();
+                            if (!tool.name || !tool.description) {
+                                log(`Skipping tool ${name} with missing name or description`);
+                                continue;
+                            }
                             if (this._memoryService) {
                                 tool.setMemoryService(this._memoryService);
                             }
@@ -167,6 +165,9 @@ class ToolLoader extends GObject.Object {
                                 description: tool.description,
                                 parameters: tool.parameters
                             });
+                            log(`Successfully loaded tool: ${tool.name}`);
+                        } else {
+                            log(`Tool module ${toolName} does not export a Tool class`);
                         }
                     } catch (e) {
                         logError(e, `Failed to load tool: ${name}`);
@@ -174,7 +175,7 @@ class ToolLoader extends GObject.Object {
                 }
             }
             enumerator.close(null);
-            log(`Loaded ${this._availableTools.length} tools`);
+            log(`Loaded ${this._availableTools.length} tools: ${this._availableTools.map(t => t.name).join(', ')}`);
         } catch (e) {
             logError(e, "Error loading tools");
         }

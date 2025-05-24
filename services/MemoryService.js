@@ -312,13 +312,13 @@ var MemoryService = GObject.registerClass({
             // Install llama-cpp-python with CPU support
             log('Checking llama-cpp-python installation...');
             try {
-                const checkResult = await this._runAsyncCommandWithTimeout([
+                const checkOutput = await this._runAsyncCommandWithTimeout([
                     this._venvPipPath, 'show', 'llama-cpp-python'
                 ], 10000);
                 
                 // Check if package is not installed (output contains "WARNING: Package(s) not found")
-                const isNotInstalled = checkResult.output.includes('WARNING: Package(s) not found') || 
-                                     checkResult.output.includes('Package(s) not found');
+                const isNotInstalled = checkOutput.includes('WARNING: Package(s) not found') || 
+                                     checkOutput.includes('Package(s) not found');
                 
                 if (isNotInstalled) {
                     log('llama-cpp-python not found, installing with CPU support...');
@@ -328,15 +328,11 @@ var MemoryService = GObject.registerClass({
                     env.push('CMAKE_ARGS="-DLLAMA_BLAS=ON -DLLAMA_BLAS_VENDOR=OpenBLAS"');
                     
                     // Install with CPU-specific build flags
-                    const installResult = await this._runAsyncCommandWithTimeout([
+                    const installOutput = await this._runAsyncCommandWithTimeout([
                         this._venvPipPath, 'install',
                         'llama-cpp-python',
                         '--no-cache-dir'
                     ], 600000, env); // 10 minute timeout for build
-                    
-                    if (installResult.error && !installResult.error.includes('WARNING: Package(s) not found')) {
-                        throw new Error(`Installation failed: ${installResult.error}`);
-                    }
                     
                     log('Successfully installed llama-cpp-python with CPU support');
                 } else {
@@ -356,17 +352,17 @@ var MemoryService = GObject.registerClass({
                     env.push('CMAKE_ARGS="-DLLAMA_BLAS=ON -DLLAMA_BLAS_VENDOR=OpenBLAS"');
                     
                     // Install with CPU-specific build flags
-                    const installResult = await this._runAsyncCommandWithTimeout([
-                        this._venvPipPath, 'install',
-                        'llama-cpp-python',
-                        '--no-cache-dir'
-                    ], 600000, env); // 10 minute timeout for build
-                    
-                    if (installResult.error) {
-                        log(`Failed to install llama-cpp-python: ${installResult.error}`);
-                        log('Memory processing will be disabled, but other features will work');
-                    } else {
+                    try {
+                        const installOutput = await this._runAsyncCommandWithTimeout([
+                            this._venvPipPath, 'install',
+                            'llama-cpp-python',
+                            '--no-cache-dir'
+                        ], 600000, env); // 10 minute timeout for build
+                        
                         log('Successfully installed llama-cpp-python with CPU support');
+                    } catch (installError) {
+                        log(`Failed to install llama-cpp-python: ${installError.message}`);
+                        log('Memory processing will be disabled, but other features will work');
                     }
                 }
             }
@@ -614,15 +610,25 @@ var MemoryService = GObject.registerClass({
                     if (msg.status_code === 200) {
                         try {
                             const response = JSON.parse(msg.response_body.data);
-                            resolve(response.status === 'healthy');
+                            // Check both that the server is healthy AND the model is loaded
+                            const isHealthy = response.status === 'healthy' && response.model_loaded === true;
+                            if (isHealthy) {
+                                debug('Server is healthy and model is loaded');
+                            } else {
+                                debug(`Server status: ${response.status}, model loaded: ${response.model_loaded}`);
+                            }
+                            resolve(isHealthy);
                         } catch (e) {
+                            debug(`Error parsing health response: ${e.message}`);
                             resolve(false);
                         }
-                        } else {
+                    } else {
+                        debug(`Health check failed with status: ${msg.status_code}`);
                         resolve(false);
                     }
                 });
-        } catch (e) {
+            } catch (e) {
+                debug(`Error in health check: ${e.message}`);
                 resolve(false);
             }
         });
@@ -670,11 +676,6 @@ var MemoryService = GObject.registerClass({
                 throw new Error('No tools available to load');
             }
 
-            // Fetch already indexed tool names and their details
-            const indexedNames = await this.getIndexedToolNames();
-            // Also fetch current indexed tool details for comparison
-            const currentIndexed = await this._getIndexedToolDetails();
-            
             // Store the tool descriptions for later matching
             this._toolDescriptions = tools.map(tool => ({
                 name: tool.name,
@@ -686,133 +687,97 @@ var MemoryService = GObject.registerClass({
             
             debug(`Loaded ${this._toolDescriptions.length} tool descriptions into memory`);
             
+            // Get currently indexed tools
+            const indexedTools = await this.getIndexedToolNames();
+            debug(`Found ${indexedTools.size} tools already indexed`);
+            
             // Only index tools that are new or have changed
-            const formattedDescriptions = this._toolDescriptions.filter(tool => {
-                if (!indexedNames.has(tool.name)) return true;
-                // Compare description and parameters
-                const indexed = currentIndexed[tool.name];
-                if (!indexed) return true;
-                return indexed.description !== tool.description || 
-                       JSON.stringify(indexed.parameters) !== JSON.stringify(tool.parameters) ||
-                       JSON.stringify(indexed.keywords) !== JSON.stringify(tool.keywords);
-            }).map(tool => ({
-                id: tool.name,
-                text: `${tool.name}: ${tool.description}\nKeywords: ${tool.keywords.join(', ')}\nParameters: ${JSON.stringify(tool.parameters)}`
-            }));
+            const toolsToIndex = this._toolDescriptions.filter(tool => {
+                if (!indexedTools.has(tool.name)) {
+                    debug(`Tool ${tool.name} is not indexed, will be added`);
+                    return true;
+                }
+                return false;
+            });
+            
+            if (toolsToIndex.length > 0) {
+                // Format tool descriptions for indexing
+                const formattedDescriptions = toolsToIndex.map(tool => ({
+                    id: tool.name,
+                    text: `${tool.name}: ${tool.description}\nKeywords: ${tool.keywords.join(', ')}\nParameters: ${JSON.stringify(tool.parameters)}`,
+                    context: {
+                        category: tool.category,
+                        parameters: tool.parameters,
+                        keywords: tool.keywords
+                    }
+                }));
 
-            if (formattedDescriptions.length > 0) {
                 await this._indexDescriptions(formattedDescriptions, 'tools');
-                info(`Indexed/updated ${formattedDescriptions.length} tool descriptions into memory system`);
+                info(`Indexed ${formattedDescriptions.length} new tool descriptions into memory system`);
             } else {
-                log('No new or changed tools to index.');
+                debug('All tools are already indexed, no new tools to add');
             }
+            
         } catch (error) {
             log(`Error loading tools: ${error.message}`);
             throw error;
         }
     }
 
-    /**
-     * Fetch all indexed tool details (name, description, parameters) from the 'tools' namespace
-     * @returns {Promise<Object>} Map of tool name to {description, parameters}
-     */
-    async _getIndexedToolDetails() {
-        if (!this._modelLoaded) {
-            log('Server not running, cannot fetch indexed tool details');
-            return {};
+    async loadToolDescriptions(tools) {
+        if (!this._initialized) {
+            log('Memory service not initialized, cannot load tool descriptions');
+            return;
         }
-        return new Promise((resolve, reject) => {
-            try {
-                const message = Soup.Message.new('POST', `${this._serverUrl}/search`);
-                message.request_headers.append('Content-Type', 'application/json');
-                const payload = JSON.stringify({
-                    query: '',
-                    top_k: 1000, // Large number to get all tools
-                    namespace: 'tools'
-                });
-                message.set_request_body_from_bytes('application/json', new GLib.Bytes(payload));
+
+        log(`Starting tool indexing process with ${tools.length} tools`);
+        log(`Tools to process: ${tools.map(t => t.name).join(', ')}`);
+
+        try {
+            // Format tool descriptions
+            const descriptions = tools.map(tool => ({
+                id: tool.name,
+                text: `${tool.name}: ${tool.description}\nKeywords: ${tool.keywords.join(', ')}\nParameters: ${JSON.stringify(tool.parameters)}`,
+                context: {
+                    category: tool.category,
+                    parameters: tool.parameters,
+                    keywords: tool.keywords
+                }
+            }));
+            
+            // Index tool descriptions in the 'tools' namespace
+            const message = Soup.Message.new('POST', `${this._serverUrl}/index`);
+            message.request_headers.append('Content-Type', 'application/json');
+            const payload = JSON.stringify({
+                namespace: 'tools',
+                documents: descriptions
+            });
+            message.set_request_body_from_bytes('application/json', new GLib.Bytes(payload));
+            
+            return new Promise((resolve, reject) => {
                 this._httpSession.queue_message(message, (session, msg) => {
                     if (msg.status_code === 200) {
                         try {
                             const response = JSON.parse(msg.response_body.data);
-                            const details = {};
-                            response.results.forEach(result => {
-                                const toolMatch = result.text.match(/^([^:]+):(.+?)\nParameters: (\{.*\})/s);
-                                if (toolMatch) {
-                                    const name = toolMatch[1].trim();
-                                    const description = toolMatch[2].trim();
-                                    let parameters = {};
-                                    try {
-                                        parameters = JSON.parse(toolMatch[3]);
-                                    } catch {}
-                                    details[name] = { description, parameters };
-                                }
-                            });
-                            resolve(details);
+                            log(`Successfully indexed ${descriptions.length} tool descriptions`);
+                            log(`Indexed tools: ${descriptions.map(d => d.id).join(', ')}`);
+                            this._toolDescriptions = tools;
+                            resolve(response);
                         } catch (e) {
-                            log(`Error parsing tool details: ${e.message}`);
+                            log(`Error parsing tool indexing response: ${e.message}`);
                             reject(e);
                         }
                     } else {
-                        log(`Failed to fetch tool details: ${msg.status_code}`);
-                        reject(new Error(`Failed to fetch tool details: ${msg.status_code}`));
+                        log(`Failed to index tool descriptions: ${msg.status_code}`);
+                        reject(new Error(`Failed to index tool descriptions: ${msg.status_code}`));
                     }
                 });
-            } catch (e) {
-                log(`Error in _getIndexedToolDetails: ${e.message}`);
-                reject(e);
-            }
-        });
-    }
-
-    async loadToolDescriptions(tools) {
-        if (!this._modelLoaded) {
-            log('Server not running, cannot load tool descriptions');
-            return;
-        }
-        // Fetch already indexed tool names and their details
-        const indexedNames = await this.getIndexedToolNames();
-        const currentIndexed = await this._getIndexedToolDetails();
-        // Only index tools that are new or have changed
-        const descriptions = tools.filter(tool => {
-            if (!indexedNames.has(tool.name)) return true;
-            const indexed = currentIndexed[tool.name];
-            if (!indexed) return true;
-            return indexed.description !== tool.description || JSON.stringify(indexed.parameters) !== JSON.stringify(tool.parameters);
-        }).map(tool => ({
-            id: tool.name,
-            text: `${tool.name}: ${tool.description}\nParameters: ${JSON.stringify(tool.parameters)}`
-        }));
-        if (descriptions.length === 0) {
-            log('No new or changed tools to index.');
-            return;
-        }
-        // Index tool descriptions in the 'tools' namespace
-        const message = Soup.Message.new('POST', `${this._serverUrl}/index`);
-        message.request_headers.append('Content-Type', 'application/json');
-        const payload = JSON.stringify({
-            namespace: 'tools',
-            documents: descriptions
-        });
-        message.set_request_body_from_bytes('application/json', new GLib.Bytes(payload));
-        return new Promise((resolve, reject) => {
-            this._httpSession.queue_message(message, (session, msg) => {
-                if (msg.status_code === 200) {
-                    try {
-                        const response = JSON.parse(msg.response_body.data);
-                        log(`Indexed/updated ${descriptions.length} tool descriptions`);
-                        this._toolDescriptions = tools;
-                        resolve(response);
-                    } catch (e) {
-                        log(`Error parsing tool indexing response: ${e.message}`);
-                        reject(e);
-                    }
-                } else {
-                    log(`Failed to index tool descriptions: ${msg.status_code}`);
-                    reject(new Error(`Failed to index tool descriptions: ${msg.status_code}`));
-                }
             });
-        });
+        } catch (e) {
+            log(`Error in loadToolDescriptions: ${e.message}`);
+            log(`Stack trace: ${e.stack}`);
+            throw e;
+        }
     }
 
     /**
@@ -915,12 +880,21 @@ var MemoryService = GObject.registerClass({
                             const response = JSON.parse(msg.response_body.data);
                             if (response.status === 'success' && response.results) {
                                 // Convert results to tool descriptions
-                                const tools = response.results.map(result => ({
-                                    name: result.id,
-                                    description: result.text,
-                                    category: result.context?.category || 'general',
-                                    parameters: result.context?.parameters || {}
-                                }));
+                                const tools = response.results.map(result => {
+                                    // Extract tool name from the text field since result.id is a UUID
+                                    // The text format is: "tool_name: description\nKeywords: ...\nParameters: ..."
+                                    const textLines = result.text.split('\n');
+                                    const firstLine = textLines[0] || '';
+                                    const colonIndex = firstLine.indexOf(':');
+                                    const toolName = colonIndex > 0 ? firstLine.substring(0, colonIndex).trim() : result.id;
+                                    
+                                    return {
+                                        name: toolName,
+                                        description: result.text,
+                                        category: result.context?.category || 'general',
+                                        parameters: result.context?.parameters || {}
+                                    };
+                                });
                                 resolve(tools);
                             } else {
                                 log('No tool descriptions found in response');
@@ -982,150 +956,88 @@ var MemoryService = GObject.registerClass({
         });
     }
 
-    async getRelevantMemories(query, top_k = 3) {
-        if (!this._modelLoaded) {
-            log('Server not running, cannot retrieve memories');
-            return [];
+    async getRelevantMemories(query, topK = 3) {
+        if (!this._initialized) {
+            log('Memory service not initialized');
+            return { conversation_history: [], user_info: [], world_facts: [], volatile_info: [] };
         }
 
-        // Extract query intent to filter memories
-        const queryIntent = this._extractQueryIntent(query);
-        
-        // Get both conversation history and LLM memories
-        const [historyMemories, llmMemories] = await Promise.all([
-            this._getConversationHistory(query, top_k),
-            this._getLLMMemories(query, top_k)
-        ]);
+        try {
+            // Search across multiple namespaces for different types of memories
+            const searchPromises = [
+                // Search conversation history (existing behavior)
+                this._searchNamespace(query, 'conversation_history', topK, 0.3),
+                // Search user personal information
+                this._searchNamespace(query, 'user_info', topK, 0.25),
+                // Search world facts
+                this._searchNamespace(query, 'world_facts', topK, 0.3),
+                // Search volatile information (time-sensitive data)
+                this._searchNamespace(query, 'volatile_info', topK, 0.25)
+            ];
 
-        // Combine and format the results
-        return {
-            conversation_history: historyMemories,
-            llm_memories: llmMemories
-        };
+            const results = await Promise.all(searchPromises);
+            
+            return {
+                conversation_history: results[0] || [],
+                user_info: results[1] || [],
+                world_facts: results[2] || [],
+                volatile_info: results[3] || []
+            };
+        } catch (error) {
+            log(`Error retrieving memories: ${error.message}`);
+            return { conversation_history: [], user_info: [], world_facts: [], volatile_info: [] };
+        }
     }
 
-    async _getConversationHistory(query, top_k) {
+    async _searchNamespace(query, namespace, topK, minScore) {
         return new Promise((resolve, reject) => {
-            try {
-                const message = Soup.Message.new('POST', `${this._serverUrl}/search`);
-                message.request_headers.append('Content-Type', 'application/json');
-                
-                const payload = JSON.stringify({
-                    query,
-                    top_k,
-                    namespace: 'conversation_history',
-                    min_score: 0.3
-                });
-                
-                message.set_request_body_from_bytes('application/json', new GLib.Bytes(payload));
-                
-                this._httpSession.queue_message(message, (session, msg) => {
-                    if (!msg) {
-                        const error = new Error('HTTP response message is null in _getConversationHistory');
-                        log(`Error in _getConversationHistory: ${error.message}`);
-                        reject(error);
-                        return;
-                    }
-                    
-                    if (msg.status_code === 200) {
-                        try {
-                            const response = JSON.parse(msg.response_body.data);
-                            const formattedHistory = response.results
-                                .filter(memory => {
-                                    const relevance = this._calculateRelevance(memory.score, memory.context);
-                                    return relevance > 0.3;
-                                })
-                                .map(memory => ({
-                                    id: memory.id,
-                                    text: memory.text,
-                                    score: memory.score,
-                                    context: memory.context || {},
-                                    relevance: this._calculateRelevance(memory.score, memory.context)
-                                }))
-                                .sort((a, b) => b.relevance - a.relevance)
-                                .slice(0, 2);
-                            
-                            resolve(formattedHistory);
-                        } catch (e) {
-                            log(`Error parsing conversation history: ${e.message}`);
-                            reject(e);
-                        }
-                    } else {
-                        reject(new Error(`Conversation history search failed: ${msg.status_code}`));
-                    }
-                });
-            } catch (e) {
-                reject(e);
-            }
-        });
-    }
+            const searchData = {
+                query: query,
+                top_k: topK,
+                namespace: namespace,
+                min_score: minScore
+            };
 
-    async _getLLMMemories(query, top_k) {
-        return new Promise((resolve, reject) => {
-            try {
-                const message = Soup.Message.new('POST', `${this._serverUrl}/search`);
-                message.request_headers.append('Content-Type', 'application/json');
-                
-                const payload = JSON.stringify({
-                    query,
-                    top_k,
-                    namespace: 'llm_memories',
-                    min_score: 0.2
-                });
-                
-                message.set_request_body_from_bytes('application/json', new GLib.Bytes(payload));
-                
-                this._httpSession.queue_message(message, (session, msg) => {
-                    if (!msg) {
-                        const error = new Error('HTTP response message is null in _getLLMMemories');
-                        log(`Error in _getLLMMemories: ${error.message}`);
-                        reject(error);
-                        return;
-                    }
-                    
-                    if (msg.status_code === 200) {
-                        try {
-                            const response = JSON.parse(msg.response_body.data);
-                            const formattedMemories = response.results
-                                .filter(memory => {
-                                    const relevance = this._calculateRelevance(memory.score, memory.context);
-                                    if (relevance <= 0.3) return false;
-                                    
-                                    // Filter by query intent
-                                    const queryIntent = this._extractQueryIntent(query);
-                                    if (queryIntent.type === 'weather' && 
-                                        memory.context?.metadata?.type !== 'weather') {
+            log(`Searching ${namespace} namespace for: "${query.substring(0, 50)}..."`);
+            
+            const message = Soup.Message.new('POST', `${this._serverUrl}/search`);
+            message.request_headers.append('Content-Type', 'application/json');
+            message.set_request_body_from_bytes('application/json', 
+                new GLib.Bytes(JSON.stringify(searchData)));
+
+            this._httpSession.queue_message(message, (session, msg) => {
+                if (msg.status_code === 200) {
+                    try {
+                        const response = JSON.parse(msg.response_body.data);
+                        if (response.status === 'success' && response.results) {
+                            // Filter out expired volatile memories
+                            const filteredResults = response.results.filter(result => {
+                                if (result.context?.is_volatile && result.context?.expires_at) {
+                                    const now = new Date();
+                                    const expires = new Date(result.context.expires_at);
+                                    if (now > expires) {
+                                        log(`Filtering out expired volatile memory: ${result.text.substring(0, 50)}...`);
                                         return false;
                                     }
-                                    if (queryIntent.type === 'system' && 
-                                        memory.context?.metadata?.type !== 'system') {
-                                        return false;
-                                    }
-                                    
-                                    return true;
-                                })
-                                .map(memory => ({
-                                    id: memory.id,
-                                    text: memory.text,
-                                    score: memory.score,
-                                    context: memory.context || {},
-                                    relevance: this._calculateRelevance(memory.score, memory.context)
-                                }))
-                                .sort((a, b) => b.relevance - a.relevance)
-                                .slice(0, 2);
+                                }
+                                return true;
+                            });
                             
-                            resolve(formattedMemories);
-                        } catch (e) {
-                            log(`Error parsing LLM memories: ${e.message}`);
-                            reject(e);
+                            log(`Found ${filteredResults.length} results in ${namespace} (${response.results.length - filteredResults.length} expired)`);
+                            resolve(filteredResults);
+                        } else {
+                            log(`Search failed for ${namespace}: ${response.error || 'Unknown error'}`);
+                            resolve([]);
                         }
-                    } else {
-                        reject(new Error(`LLM memories search failed: ${msg.status_code}`));
+                    } catch (error) {
+                        log(`Error parsing search response for ${namespace}: ${error.message}`);
+                        resolve([]);
                     }
-                });
-            } catch (e) {
-                reject(e);
-            }
+                } else {
+                    log(`Search request failed for ${namespace}: ${msg.status_code}`);
+                    resolve([]);
+                }
+            });
         });
     }
 
@@ -1523,13 +1435,30 @@ var MemoryService = GObject.registerClass({
         });
     }
 
-    async _runAsyncCommandWithTimeout(args, timeout) {
+    async _runAsyncCommandWithTimeout(args, timeout, env = null) {
         return new Promise((resolve, reject) => {
             try {
-                const proc = Gio.Subprocess.new(
-                    args,
-                    Gio.SubprocessFlags.STDOUT_PIPE | Gio.SubprocessFlags.STDERR_PIPE
-                );
+                const subprocessFlags = Gio.SubprocessFlags.STDOUT_PIPE | Gio.SubprocessFlags.STDERR_PIPE;
+                
+                let proc;
+                if (env) {
+                    // Create subprocess launcher with custom environment
+                    const launcher = new Gio.SubprocessLauncher({
+                        flags: subprocessFlags
+                    });
+                    
+                    // Set environment variables
+                    for (const envVar of env) {
+                        if (envVar.includes('=')) {
+                            const [key, value] = envVar.split('=', 2);
+                            launcher.setenv(key, value, true);
+                        }
+                    }
+                    
+                    proc = launcher.spawnv(args);
+                } else {
+                    proc = Gio.Subprocess.new(args, subprocessFlags);
+                }
 
                 const timeoutId = GLib.timeout_add(GLib.PRIORITY_DEFAULT, timeout, () => {
                     reject(new Error('Command timed out'));

@@ -98,10 +98,13 @@ The extension follows a structured process flow when handling user interactions:
 
 ### Memory System
 
-The extension includes a robust memory system for persistent storage and retrieval:
+The extension includes a robust memory system for persistent storage and retrieval with advanced dual-pass processing:
 
 #### Features
 - Semantic memory storage using Qdrant vector database
+- **Dual-pass memory extraction** for intelligent categorization
+- **Personal vs world knowledge** separation
+- **Volatile vs stable information** classification
 - Automatic indexing and retrieval
 - Context-aware responses
 - Memory search capabilities
@@ -110,43 +113,81 @@ The extension includes a robust memory system for persistent storage and retriev
 - Context token management for conversation history
 - Local LLM-based memory extraction using Qwen model
 - Automatic memory categorization and tagging
+- **Multi-namespace storage** for different memory types
 
 #### Implementation
 - Local Qdrant server for vector storage
 - Sentence transformers for embeddings
+- **Qwen 0.6B model for dual-pass memory processing**
 - Automatic persistence management
 - Tool system integration
 - LLM-driven memory creation
 - Configurable context window size
 - Local llama.cpp integration for memory processing
-- Qwen 0.6B model for efficient memory extraction
+- **Intelligent memory routing** to appropriate namespaces
 
-#### Memory Processing
-The system uses a local Qwen model to process and extract memories:
-- Automatic extraction of important information
-- Fact and preference identification
-- Context-aware memory creation
-- Importance level determination
-- Automatic tagging of memories
-- JSON-structured memory format
+#### Dual-Pass Memory Processing
+The system uses an advanced dual-pass extraction process with the local Qwen model:
+
+**First Pass - Personal Information Extraction:**
+- User location, preferences, and personal circumstances
+- Opinions and viewpoints
+- Past experiences and future plans
+- Personal habits and lifestyle information
+- Individual context and background
+
+**Second Pass - World Knowledge Classification:**
+- Factual information about the world
+- Current events and news
+- Weather and time-sensitive data
+- Technical information and explanations
+- Historical facts and general knowledge
+
+**Volatility Classification:**
+- **VOLATILE**: Time-sensitive information (weather, current events, "today/tomorrow" data)
+- **STABLE**: Lasting information (geographical facts, historical data, general knowledge)
+
+#### Memory Storage Namespaces
+The system automatically routes memories to specialized collections:
+
+1. **`user_info`**: Personal information about the user
+   - Location, preferences, personal circumstances
+   - Individual context and background information
+   - User-specific settings and choices
+
+2. **`world_facts`**: General world knowledge and stable facts
+   - Historical information and geographical data
+   - Technical explanations and definitions
+   - General knowledge and reference information
+
+3. **`volatile_info`**: Time-sensitive information with expiration
+   - Weather forecasts and current conditions
+   - Current events and breaking news
+   - Temporary system states and time-bound data
+   - Automatic expiration based on content type
+
+4. **`conversation_history`**: Dialog context and interaction history
+   - Recent conversation exchanges
+   - Context for ongoing discussions
+   - Interaction patterns and preferences
 
 #### Memory Creation
-The LLM autonomously creates memories based on user interactions:
-- Personal information (name, location, preferences)
-- Important decisions and choices
-- Technical configurations
-- User preferences and settings
-- Significant conversation context
+The LLM autonomously creates and categorizes memories based on user interactions:
+- **Intelligent routing** to appropriate namespaces
+- **Automatic expiration** for volatile information
+- **Importance scoring** for relevance ranking
+- **Context preservation** for future reference
+- **Duplicate detection** and consolidation
 
-The memory processing system uses a dedicated endpoint to extract and store information:
+The memory processing system extracts structured information:
 ```json
 {
-  "memories": [
+  "personal": ["User lives in Memphis", "Prefers morning coffee"],
+  "world_facts": ["Memphis is in Tennessee", "Coffee contains caffeine"],
+  "volatile": [
     {
-    "text": "Memory content",
-      "type": "fact/preference/context/decision",
-      "importance": "high/normal/low",
-      "tags": ["relevant", "tags"]
+      "text": "Weather in Memphis: 75°F, thunderstorms likely",
+      "expires_at": "2025-05-25T00:00:00Z"
     }
   ]
 }
@@ -156,11 +197,17 @@ The memory processing system uses a dedicated endpoint to extract and store info
 - Configurable maximum context tokens (default: 2000)
 - Smart conversation history pruning
 - Priority-based message retention
-- Memory-based context enhancement
+- **Memory-type prioritization** (personal > volatile > facts > history)
+- **Expiration-aware filtering** for volatile data
 
 #### Directory Structure
 ```
 qdrant/          # Qdrant vector database storage
+├── user_info/          # Personal user information
+├── world_facts/        # General world knowledge
+├── volatile_info/      # Time-sensitive data with expiration
+├── conversation_history/  # Dialog context
+└── tools/              # Tool descriptions
 logs/            # Server and extension logs
 ```
 

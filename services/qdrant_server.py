@@ -147,66 +147,173 @@ def load_llm():
         return None
 
 def process_memory_with_llm(text, context=None):
-    """Process memory text with LLM to extract key information and generate multiple memories"""
+    """Process memory text with LLM using dual-pass extraction for personal vs world information"""
     global llm
     if not llm:
         with llm_lock:
             if not llm:
                 llm = load_llm()
                 if not llm:
-                    return [text]  # Return original text as single memory if LLM fails to load
+                    return {"personal": [text], "world_facts": [], "volatile": []}  # Return original as personal if LLM fails
     
     try:
-        # Create prompt for memory processing
-        prompt = f"""Process the following memory and extract multiple key pieces of information.
-        Format the output as a list of clear, concise summaries, each on a new line.
-        Each summary should capture a distinct aspect or insight from the memory.
-        
-        Memory: {text}
+        # FIRST PASS: Extract personal information about the user
+        personal_prompt = f"""Analyze the following conversation and extract ONLY personal information about the USER. Focus on:
+- Where they live (city, state, country, neighborhood)
+- Personal preferences (favorite foods, colors, activities)
+- Opinions and viewpoints
+- Personal circumstances (job, family, hobbies)
+- Past experiences mentioned
+- Future plans or intentions
+
+IGNORE general world facts, weather data, or temporary information.
+
+Conversation: {text}
         
         Context: {json.dumps(context) if context else 'No additional context'}
         
-        Summaries:
+Extract 1-3 key personal insights about the user. If no personal information is found, respond with "NONE".
+
+Personal insights:
         1. """
         
-        # Generate response
-        response = llm(
-            prompt,
-            max_tokens=1024,  # Increased token limit for multiple memories
-            temperature=0.3,
-            stop=["Memory:", "Context:", "Summaries:"],
+        # Generate personal information extraction
+        personal_response = llm(
+            personal_prompt,
+            max_tokens=512,
+            temperature=0.2,
+            stop=["Conversation:", "Context:", "Personal insights:", "2.", "3.", "4."],
             echo=False
         )
         
-        # Extract the generated text
-        processed_text = response['choices'][0]['text'].strip()
+        personal_text = personal_response['choices'][0]['text'].strip()
+        personal_memories = []
         
-        # If processing failed or returned empty, return original text as single memory
-        if not processed_text:
-            return [text]
-            
-        # Split the response into individual memories
-        memories = []
-        for line in processed_text.split('\n'):
-            line = line.strip()
+        if personal_text and personal_text != "NONE":
+            # Parse numbered personal insights
+            for line in personal_text.split('\n'):
+                line = line.strip()
             if line and not line.startswith(('1.', '2.', '3.', '4.', '5.')):
-                memories.append(line)
-            elif line:
-                # Remove numbering and add to memories
-                memory = line.split('.', 1)[1].strip() if '.' in line else line
-                if memory:
-                    memories.append(memory)
+                    if len(line) > 10:  # Only add substantial insights
+                        personal_memories.append(line)
+                    elif line and '.' in line:
+                        # Remove numbering and add to memories
+                        memory = line.split('.', 1)[1].strip() if '.' in line else line
+                        if memory and len(memory) > 10:
+                            personal_memories.append(memory)
+                        elif line and 'TYPE:' in line:
+                        # Handle TYPE: VOLATILE/STABLE
+                            if 'VOLATILE' in line:
+                                volatile_memories.append(line)
+                            elif 'STABLE' in line:
+                                world_memories.append(line)
         
-        # If no valid memories were extracted, return original text as single memory
-        if not memories:
-            return [text]
+        # SECOND PASS: Extract world facts and determine volatility
+        world_facts_prompt = f"""Analyze the following conversation and extract factual information about the world. Focus on:
+- Current events and news
+- Weather information (mark as VOLATILE if time-sensitive)
+- Facts about places, organizations, or entities
+- Technical information or explanations
+- Historical facts or data
+
+For each fact, determine if it's VOLATILE (time-sensitive) or STABLE (lasting):
+- VOLATILE: Weather forecasts, current events, temporary conditions, "today/tomorrow" information
+- STABLE: Historical facts, geographical information, general knowledge
+
+Conversation: {text}
+
+Context: {json.dumps(context) if context else 'No additional context'}
+
+Extract factual information in this format:
+TYPE: VOLATILE/STABLE
+FACT: [the factual statement]
+EXPIRES: [for VOLATILE only - date when this becomes outdated, format: YYYY-MM-DD]
+
+Facts:
+1. """
+        
+        # Generate world facts extraction
+        facts_response = llm(
+            world_facts_prompt,
+            max_tokens=512,
+            temperature=0.2,
+            stop=["Conversation:", "Context:", "Facts:"],
+            echo=False
+        )
+        
+        facts_text = facts_response['choices'][0]['text'].strip()
+        world_memories = []
+        volatile_memories = []
+        
+        if facts_text:
+            # Parse structured facts
+            current_fact = {}
+            for line in facts_text.split('\n'):
+                line = line.strip()
+                if line.startswith('TYPE:'):
+                    current_fact['type'] = line.replace('TYPE:', '').strip()
+                elif line.startswith('FACT:'):
+                    current_fact['fact'] = line.replace('FACT:', '').strip()
+                elif line.startswith('EXPIRES:'):
+                    current_fact['expires'] = line.replace('EXPIRES:', '').strip()
+                elif line and line[0].isdigit() and '.' in line:
+                    # Process previous fact if complete
+                    if 'fact' in current_fact and current_fact['fact']:
+                        if current_fact.get('type') == 'VOLATILE':
+                            # Calculate expiration date
+                            expires_at = None
+                            if 'expires' in current_fact:
+                                try:
+                                    expires_at = datetime.datetime.strptime(current_fact['expires'], '%Y-%m-%d').isoformat()
+                                except:
+                                    # Default to 24 hours for volatile data
+                                    expires_at = (datetime.datetime.now() + datetime.timedelta(hours=24)).isoformat()
+                            else:
+                                expires_at = (datetime.datetime.now() + datetime.timedelta(hours=24)).isoformat()
+                                
+                            volatile_memories.append({
+                                'text': current_fact['fact'],
+                                'expires_at': expires_at
+                            })
+                        else:
+                            world_memories.append(current_fact['fact'])
+                    
+                    # Start new fact
+                    current_fact = {}
             
-        return memories
+            # Process final fact if exists
+            if 'fact' in current_fact and current_fact['fact']:
+                if current_fact.get('type') == 'VOLATILE':
+                    expires_at = None
+                    if 'expires' in current_fact:
+                        try:
+                            expires_at = datetime.datetime.strptime(current_fact['expires'], '%Y-%m-%d').isoformat()
+                        except:
+                            expires_at = (datetime.datetime.now() + datetime.timedelta(hours=24)).isoformat()
+                    else:
+                        expires_at = (datetime.datetime.now() + datetime.timedelta(hours=24)).isoformat()
+                        
+                    volatile_memories.append({
+                        'text': current_fact['fact'],
+                        'expires_at': expires_at
+                    })
+                else:
+                    world_memories.append(current_fact['fact'])
+
+        # Return categorized memories
+        result = {
+            "personal": personal_memories if personal_memories else [text] if not world_memories and not volatile_memories else [],
+            "world_facts": world_memories,
+            "volatile": volatile_memories
+        }
+        
+        logger.info(f"Memory extraction result: {len(result['personal'])} personal, {len(result['world_facts'])} world facts, {len(result['volatile'])} volatile")
+        return result
         
     except Exception as e:
         logger.error(f"Error processing memory with LLM: {str(e)}")
         logger.error(traceback.format_exc())
-        return [text]  # Return original text as single memory on error
+        return {"personal": [text], "world_facts": [], "volatile": []}  # Return original as personal on error
 
 # Initialize Qdrant client
 QDRANT_DIR = os.path.expanduser("~/.local/share/gnome-shell/extensions/llmchat@charja113.gmail.com/qdrant")
@@ -340,20 +447,76 @@ def index_documents():
         for doc in documents:
             try:
                 if namespace == 'memories' or namespace == 'llm_memories':
-                    # Process memory with LLM - now returns a list of memories
-                    processed_memories = process_memory_with_llm(doc['text'], doc.get('context'))
+                    # Process memory with LLM - now returns categorized memories
+                    memory_results = process_memory_with_llm(doc['text'], doc.get('context'))
                     
-                    # Create a new document for each processed memory
-                    for memory in processed_memories:
+                    # Create documents for personal memories (user_info namespace)
+                    for personal_memory in memory_results.get('personal', []):
+                        if personal_memory.strip():
+                            new_doc = doc.copy()
+                            new_doc['text'] = personal_memory
+                            new_doc['id'] = f"{doc['id']}_personal_{uuid.uuid4().hex[:8]}"
+                            new_doc['namespace'] = 'user_info'  # Store personal info separately
+                            new_doc['memory_type'] = 'personal'
+                            processed_documents.append(new_doc)
+                    
+                    # Create documents for world facts (world_facts namespace)
+                    for world_fact in memory_results.get('world_facts', []):
+                        if world_fact.strip():
+                            new_doc = doc.copy()
+                            new_doc['text'] = world_fact
+                            new_doc['id'] = f"{doc['id']}_world_{uuid.uuid4().hex[:8]}"
+                            new_doc['namespace'] = 'world_facts'
+                            new_doc['memory_type'] = 'world_fact'
+                            processed_documents.append(new_doc)
+                    
+                    # Create documents for volatile memories (volatile_info namespace)
+                    for volatile_memory in memory_results.get('volatile', []):
+                        if volatile_memory.get('text', '').strip():
+                            new_doc = doc.copy()
+                            new_doc['text'] = volatile_memory['text']
+                            new_doc['id'] = f"{doc['id']}_volatile_{uuid.uuid4().hex[:8]}"
+                            new_doc['namespace'] = 'volatile_info'
+                            new_doc['memory_type'] = 'volatile'
+                            # Add expiration information to context
+                            if 'context' not in new_doc:
+                                new_doc['context'] = {}
+                            new_doc['context']['is_volatile'] = True
+                            new_doc['context']['expires_at'] = volatile_memory.get('expires_at')
+                            processed_documents.append(new_doc)
+                    
+                    # If no memories were extracted, store original as personal memory
+                    if not memory_results.get('personal') and not memory_results.get('world_facts') and not memory_results.get('volatile'):
                         new_doc = doc.copy()
-                        new_doc['text'] = memory
-                        new_doc['id'] = f"{doc['id']}_{uuid.uuid4().hex[:8]}"  # Generate unique ID for each memory
+                        new_doc['id'] = f"{doc['id']}_{uuid.uuid4().hex[:8]}"
+                        new_doc['namespace'] = 'user_info'  # Default to personal
+                        new_doc['memory_type'] = 'personal'
                         processed_documents.append(new_doc)
                 else:
-                    processed_documents.append(doc)
+                    # For non-memory documents (like tools), assign the namespace and process directly
+                    new_doc = doc.copy()
+                    new_doc['namespace'] = namespace  # Assign the namespace parameter
+                    processed_documents.append(new_doc)
             except Exception as e:
                 logger.warning(f"Error processing document {doc.get('id', 'unknown')}: {str(e)}")
-                processed_documents.append(doc)  # Use original doc if processing fails
+                # For error cases, still try to process with assigned namespace
+                new_doc = doc.copy()
+                new_doc['namespace'] = namespace
+                processed_documents.append(new_doc)
+
+        # Ensure all required collections exist
+        collections_needed = set([doc.get('namespace', namespace) for doc in processed_documents])
+        for collection_name in collections_needed:
+            try:
+                ensure_collection(collection_name)
+            except Exception as e:
+                error_msg = f"Failed to ensure collection {collection_name} exists: {str(e)}"
+                logger.error(error_msg)
+                return jsonify({
+                    'status': 'error',
+                    'error': error_msg,
+                    'count': 0
+                }), 500
 
         # Generate embeddings for all documents
         try:
@@ -380,9 +543,9 @@ def index_documents():
                     payload={
                         'text': doc['text'],
                         'original_id': doc['id'],
-                        'namespace': namespace,
+                        'namespace': doc['namespace'],
                         'context': doc.get('context', {}),
-                        'processed': namespace in ['memories', 'llm_memories']  # Flag if LLM processed
+                        'processed': doc['namespace'] in ['memories', 'llm_memories']  # Flag if LLM processed
                     }
                 )
                 points.append(point)
@@ -466,22 +629,35 @@ def search_documents():
 
         # Search in collection
         try:
-            results = client.search(
+            results = client.query_points(
                 collection_name=namespace,
-                query_vector=query_embedding.tolist(),
+                query=query_embedding.tolist(),
                 limit=top_k,
-                score_threshold=min_score
+                score_threshold=min_score,
+                with_payload=True,  # Ensure we get the full payload
+                with_vectors=False   # We don't need the vectors in response
             )
             
             # Format results
             formatted_results = []
-            for result in results:
-                formatted_results.append({
-                    'id': result.payload.get('original_id', str(result.id)),
-                    'text': result.payload.get('text', ''),
-                    'score': result.score,
-                    'context': result.payload.get('context', {})
-                })
+            for result in results.points:  # Use results.points instead of iterating results directly
+                try:
+                    # Handle different result formats
+                    if hasattr(result, 'id') and hasattr(result, 'payload') and hasattr(result, 'score'):
+                        # Standard qdrant result format
+                        formatted_results.append({
+                            'id': str(result.id),
+                            'text': result.payload.get('text', ''),
+                            'score': result.score,
+                            'context': result.payload.get('context', {})
+                        })
+                    else:
+                        logger.warning(f"Unexpected result format: {type(result)} - {result}")
+                        continue
+                        
+                except Exception as e:
+                    logger.warning(f"Error formatting result: {str(e)}")
+                    continue
             
             logger.info(f"Found {len(formatted_results)} results")
             return jsonify({
@@ -511,15 +687,22 @@ def search_documents():
 def health_check():
     """Health check endpoint"""
     try:
-        # Ensure collections exist
+        # Ensure all collections exist including new memory namespaces
         ensure_collection('tools')
         ensure_collection('memories')
         ensure_collection('llm_memories')
         ensure_collection('conversation_history')
+        ensure_collection('user_info')       # Personal information about the user
+        ensure_collection('world_facts')     # General world knowledge
+        ensure_collection('volatile_info')   # Time-sensitive information
         
         return jsonify({
             'status': 'healthy',
-            'model_loaded': model is not None
+            'model_loaded': model is not None,
+            'collections': [
+                'tools', 'memories', 'llm_memories', 'conversation_history',
+                'user_info', 'world_facts', 'volatile_info'
+            ]
         })
     except Exception as e:
         logger.error(f"Error in health check: {str(e)}")
