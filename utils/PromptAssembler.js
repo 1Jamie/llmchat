@@ -40,7 +40,7 @@ var PromptAssembler = GObject.registerClass({
         return baseTokens + overhead;
     }
 
-    _getToolSystemPrompt(relevantToolsPrompt) {
+    _getToolSystemPrompt(relevantToolsPrompt, recentToolCalls = [], toolResultsSummary = '') {
         let toolsText = '';
         let availableTools = [];
         
@@ -60,32 +60,58 @@ var PromptAssembler = GObject.registerClass({
             toolsText = relevantToolsPrompt;
         }
 
-        const currentTime = new Date().toISOString();
-        
-        return `You are a helpful assistant with access to the following tools. When you need to use a tool, respond with a JSON object in this exact format:
+        const now = new Date();
+        const dayOfWeek = now.toLocaleDateString('en-US', { weekday: 'long' });
+        const currentTime = `${dayOfWeek}, ${now.toLocaleString()}`;
 
+        // Summarize recent tool calls if provided
+        let recentToolCallsText = '';
+        if (recentToolCalls && recentToolCalls.length > 0) {
+            recentToolCallsText = '\nRECENT TOOL CALLS (do NOT repeat these):\n' +
+                recentToolCalls.map((call, idx) => {
+                    return `${idx+1}. ${call}`;
+                }).join('\n') + '\n';
+        }
+        // Add tool results summary if provided
+        let toolResultsSection = '';
+        if (toolResultsSummary && toolResultsSummary.length > 0) {
+            toolResultsSection = `\nTOOL RESULTS AVAILABLE (use these to answer if possible):\n${toolResultsSummary}\n`;
+        }
+
+        return `You are a helpful assistant with access to tools when needed. Use tools strategically to gather information when you cannot answer from existing knowledge or context.
+
+🔧 TOOL USAGE RULES:
+1. **Use tools ONLY when you need specific, current, or external information**
+2. **If you already have sufficient information, answer directly - no tools needed**
+3. **After using tools, synthesize results into a complete answer**
+4. **DO NOT use tools if information is already available in the conversation**
+5. **Avoid redundant tool calls - check if similar information was already gathered**
+
+TOOL CALL FORMAT:
+When you need to use a tool, respond with JSON on its own line:
 {"tool": "tool_name", "arguments": {"param1": "value1", "param2": "value2"}}
 
 AVAILABLE TOOLS:
 ${toolsText}
+${recentToolCallsText}${toolResultsSection}
 
-IMPORTANT TOOL USAGE INSTRUCTIONS:
-1. When you need information that requires a tool, ALWAYS use the appropriate tool
-2. For weather information, use web_search with a query like "weather forecast Memphis tomorrow"
-3. For current time/date, use time_date
-4. For system settings, use system_settings
-5. Use the EXACT JSON format shown above - no extra text, no markdown code blocks
-6. Put the tool call JSON on its own line
-7. You can provide explanation text before or after the tool call JSON
+🚫 WHEN NOT TO USE TOOLS:
+- Questions about general knowledge (history, science, math, etc.)
+- Information already provided in previous messages
+- Simple calculations or reasoning tasks
+- Creative writing or opinion questions
+- When tool results are already available in the conversation
 
-Examples:
-- For weather: {"tool": "web_search", "arguments": {"query": "weather forecast Memphis tomorrow"}}
-- For time: {"tool": "time_date", "arguments": {"action": "get_current_time"}}
-- For system volume: {"tool": "system_settings", "arguments": {"action": "get_volume"}}
+✅ WHEN TO USE TOOLS:
+- Current weather, news, or real-time information
+- Specific web content or recent data
+- System information (volume, time, etc.)
+- File operations or system management tasks
+- Information that requires live data
 
 Current time: ${currentTime}
 
-Remember: Always use tools when you need current information that you cannot provide from your training data.`;
+Remember: Be efficient with tool usage. Use your knowledge first, tools second.`;
     }
 
     async assembleMessages(text, relevantToolsPrompt, chatBox = null, memoryService = null) {
@@ -114,14 +140,17 @@ Remember: Always use tools when you need current information that you cannot pro
         }
 
         // Create the system message with tool instructions and relevant tools
-        const systemPrompt = this._getToolSystemPrompt(relevantToolsPrompt);
+        const systemPrompt = this._getToolSystemPrompt(relevantToolsPrompt) + '\n- Use the current time provided to determine if memories or tool results are outdated or expired.';
         const systemMessage = {
             role: 'system',
             content: systemPrompt
         };
 
         let systemTokens = this._estimateTokens(systemPrompt, provider);
-        let currentUserText = text;
+        const now = new Date();
+        const dayOfWeek = now.toLocaleDateString('en-US', { weekday: 'long' });
+        const nowString = `${dayOfWeek}, ${now.toLocaleString()}`;
+        let currentUserText = `${text}\n\n[Current time: ${nowString}]`;
         let userTextTokens = this._estimateTokens(currentUserText, provider);
 
         // Reserve tokens for system message and current user input
@@ -140,46 +169,104 @@ Remember: Always use tools when you need current information that you cannot pro
                 
                 log(`[Memory] Retrieved memories: ${JSON.stringify(relevantMemories)}`);
                 
-                if (relevantMemories && (relevantMemories.conversation_history?.length > 0 || relevantMemories.llm_memories?.length > 0)) {
-                    // Combine both types of memories
+                if (relevantMemories && (relevantMemories.conversation_history?.length > 0 || 
+                    relevantMemories.user_info?.length > 0 || 
+                    relevantMemories.world_facts?.length > 0 || 
+                    relevantMemories.volatile_info?.length > 0)) {
+                    
+                    // Combine all types of memories
                     const allMemories = [
                         ...(relevantMemories.conversation_history || []),
-                        ...(relevantMemories.llm_memories || [])
+                        ...(relevantMemories.user_info || []),
+                        ...(relevantMemories.world_facts || []),
+                        ...(relevantMemories.volatile_info || [])
                     ];
                     
                     log(`[Memory] Combined memories count: ${allMemories.length}`);
                     
+                    // Filter out expired volatile memories
+                    const now = new Date();
+                    const filteredMemories = allMemories.filter(memory => {
+                        if (memory.context?.is_volatile && memory.context?.expires_at) {
+                            const expires = new Date(memory.context.expires_at);
+                            if (now > expires) {
+                                log(`[Memory] Skipping expired volatile memory: ${memory.text.substring(0, 50)}...`);
+                                return false;
+                            }
+                        }
+                        return true;
+                    });
+                    
                     // Sort by relevance and take top memories that fit in context
-                    allMemories.sort((a, b) => (b.relevance || 0) - (a.relevance || 0));
+                    filteredMemories.sort((a, b) => (b.score || 0) - (a.score || 0));
                     
                     let memoryText = '';
                     let memoryTokens = 0;
                     const maxMemoryTokens = Math.floor(remainingTokens * 0.3); // Use up to 30% of remaining tokens for memories
                     
-                    debug(`[Memory] Processing ${allMemories.length} memories, max tokens: ${maxMemoryTokens}`);
+                    debug(`[Memory] Processing ${filteredMemories.length} memories, max tokens: ${maxMemoryTokens}`);
                     
-                    for (const memory of allMemories) {
-                        const formattedMemory = this._formatSingleMemory(memory);
-                        const memoryTokensEstimate = this._estimateTokens(formattedMemory, provider);
-                        
-                        log(`[Memory] Memory: ${memory.text.substring(0, 50)}... (${memoryTokensEstimate} tokens)`);
-                        
-                        if (memoryTokens + memoryTokensEstimate <= maxMemoryTokens) {
-                            memoryText += formattedMemory + '\n\n';
-                            memoryTokens += memoryTokensEstimate;
-                        } else {
-                            log(`[Memory] Skipping memory due to token limit`);
-                            break; // Stop adding memories if we exceed token limit
+                    // Group memories by type for better organization
+                    const memoryGroups = {
+                        personal: filteredMemories.filter(m => relevantMemories.user_info?.includes(m)),
+                        facts: filteredMemories.filter(m => relevantMemories.world_facts?.includes(m)),
+                        volatile: filteredMemories.filter(m => relevantMemories.volatile_info?.includes(m)),
+                        history: filteredMemories.filter(m => relevantMemories.conversation_history?.includes(m))
+                    };
+                    
+                    // Add memories by priority: personal info first, then current/volatile, then facts, then history
+                    const priorityOrder = ['personal', 'volatile', 'facts', 'history'];
+                    
+                    for (const groupName of priorityOrder) {
+                        const groupMemories = memoryGroups[groupName];
+                        if (groupMemories.length > 0) {
+                            let groupHeader = '';
+                            switch (groupName) {
+                                case 'personal':
+                                    groupHeader = 'PERSONAL CONTEXT:\n';
+                                    break;
+                                case 'volatile':
+                                    groupHeader = 'CURRENT/TIME-SENSITIVE INFO:\n';
+                                    break;
+                                case 'facts':
+                                    groupHeader = 'RELEVANT FACTS:\n';
+                                    break;
+                                case 'history':
+                                    groupHeader = 'CONVERSATION HISTORY:\n';
+                                    break;
+                            }
+                            
+                            const headerTokens = this._estimateTokens(groupHeader, provider);
+                            if (memoryTokens + headerTokens <= maxMemoryTokens) {
+                                memoryText += groupHeader;
+                                memoryTokens += headerTokens;
+                                
+                                for (const memory of groupMemories) {
+                                    const formattedMemory = this._formatSingleMemory(memory);
+                                    const memoryTokensEstimate = this._estimateTokens(formattedMemory, provider);
+                                    
+                                    log(`[Memory] ${groupName}: ${memory.text.substring(0, 50)}... (${memoryTokensEstimate} tokens)`);
+                                    
+                                    if (memoryTokens + memoryTokensEstimate <= maxMemoryTokens) {
+                                        memoryText += formattedMemory + '\n';
+                                        memoryTokens += memoryTokensEstimate;
+                                    } else {
+                                        log(`[Memory] Skipping memory due to token limit`);
+                                        break;
+                                    }
+                                }
+                                memoryText += '\n';
+                            }
                         }
                     }
                     
                     if (memoryText.trim()) {
-                        memoryContext = `\n\nRELEVANT MEMORIES:\n${memoryText}Use this context to inform your response, but only reference it when directly relevant to the user's query.\n\n`;
+                        memoryContext = `\n\nRELEVANT CONTEXT:\n${memoryText}Use this context to inform your response, but only reference it when directly relevant to the user's query.\n\n`;
                         remainingTokens -= memoryTokens;
                         debug(`[Memory] Added ${memoryTokens} tokens of memory context`);
                         log(`[Memory] Final memory context length: ${memoryContext.length} chars`);
                     } else {
-                        log(`[Memory] No memory text generated despite having memories`);
+                        log(`[Memory] No memory text generated after filtering expired volatile memories`);
                     }
                 } else {
                     log(`[Memory] No relevant memories found or empty response structure`);

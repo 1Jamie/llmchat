@@ -93,36 +93,36 @@ class ProviderAdapter {
         }
 
         // Determine if this memory is important enough to store
-        const importance = await this._memoryService.determineMemoryImportance(query, response);
+        const importance = this._determineMemoryImportance(query, response);
         if (importance < 0.5) {
             log('Memory not important enough to store');
                                 return;
                             }
 
-        // Create memory object with context
-        const memory = {
-            text: `${query}\n\n${response}`,
-                                        context: {
-                                            timestamp: new Date().toISOString(),
-                conversation_id: chatId,
-                query: query,
+        // Get the current session context
+        const sessionContext = {
+            session_id: this._sessionId,
+            exchange_index: this._chatBox ? Math.floor(this._chatBox._messages.length / 2) : 0, // Each exchange is 2 messages (user + AI)
+            conversation_history: this._chatBox ? this._chatBox._getConversationHistory() : [],
+            tool_history: this._recentToolCalls,
                 provider: provider,
-                metadata: {
-                    importance: importance,
-                    type: 'conversation'
-                }
-                                        }
+            timestamp: new Date().toISOString(),
+            chat_id: chatId,
+            importance: importance
+        };
+
+        // Create memory object with complete context
+        const memory = {
+            text: `User: ${query}\n\nAssistant: ${response}`,
+            context: sessionContext
                                     };
                                     
         try {
-            const result = await this._memoryService.indexMemory(memory);
-            if (result.status === 'success') {
-                log('Successfully stored memory');
-                        } else {
-                log(`Failed to store memory: ${result.error || 'Unknown error'}`);
-                        }
+            // Store memory and let the server's dual-pass system categorize it
+            await this._memoryService.indexMemory(memory);
+            log('Memory processed with dual-pass extraction system');
                     } catch (error) {
-            log(`Failed to store memory: ${error.message}`);
+            log(`Error processing memory: ${error.message}`);
         }
     }
 
@@ -1033,27 +1033,190 @@ class ProviderAdapter {
     // ... existing code ...
 
     async _getRelevantToolsPrompt(text) {
-        // If no tools are available, return empty string
-        if (!this._chatBox || !this._chatBox._availableTools || this._chatBox._availableTools.length === 0) {
+        // Use semantic search to get relevant tools
+        if (!this._memoryService || !this._memoryService._initialized) {
+            log('Memory service not available for tool retrieval');
             return '';
         }
 
-        // Get the available tools from the chat box
-        const tools = this._chatBox._availableTools;
-        
-        // Create a prompt that describes the available tools
-        let prompt = 'Available tools:\n';
-        tools.forEach(tool => {
-            prompt += `- ${tool.name}: ${tool.description}\n`;
-            if (tool.parameters && tool.parameters.properties) {
-                prompt += '  Parameters:\n';
-                Object.entries(tool.parameters.properties).forEach(([param, details]) => {
-                    prompt += `    - ${param}: ${details.description || 'No description'}\n`;
-                });
+        try {
+            // Get relevant tools using semantic search
+            const relevantTools = await this._memoryService.getRelevantToolDescriptions(text, 5);
+            
+            log(`[Tools] Semantic search returned ${relevantTools ? relevantTools.length : 0} tools`);
+            if (relevantTools && relevantTools.length > 0) {
+                log(`[Tools] Semantic tools: ${relevantTools.map(t => `${t.name || t.id || 'unknown'}(${t.description ? t.description.substring(0, 50) : 'no desc'}...)`).join(', ')}`);
             }
-        });
-        
-        return prompt;
+            
+            if (!relevantTools || relevantTools.length === 0) {
+                log('No relevant tools found for query');
+                return '';
+            }
+
+            // Also do keyword-based matching for better tool selection
+            const keywords = text.toLowerCase().split(/\s+/);
+            log(`[Tools] Query keywords: ${keywords.join(', ')}`);
+            
+            const toolKeywords = {
+                'web_search': ['search', 'web', 'find', 'look', 'weather', 'news', 'information', 'current', 'latest', 'today', 'tomorrow'],
+                'fetch_web_content': ['content', 'article', 'page', 'website', 'url', 'read', 'fetch'],
+                'time_date': ['time', 'date', 'clock', 'schedule', 'when', 'now'],
+                'file_operations': ['file', 'folder', 'directory', 'save', 'create', 'delete', 'copy'],
+                'system_settings': ['volume', 'brightness', 'settings', 'configure', 'adjust'],
+                'workspace_management': ['workspace', 'desktop', 'switch', 'window', 'application'],
+                'system_context': ['system', 'info', 'status', 'memory', 'cpu', 'processes']
+            };
+
+            // Find tools that match keywords
+            const keywordMatches = [];
+            Object.entries(toolKeywords).forEach(([toolName, toolKeywordsList]) => {
+                const matchCount = keywords.filter(keyword => 
+                    toolKeywordsList.some(toolKeyword => 
+                        keyword.includes(toolKeyword) || toolKeyword.includes(keyword)
+                    )
+                ).length;
+                
+                if (matchCount > 0) {
+                    keywordMatches.push({ toolName, matchCount });
+                    log(`[Tools] Keyword match: ${toolName} (${matchCount} matches)`);
+                }
+            });
+
+            // Combine semantic and keyword matches
+            const allRelevantTools = new Set();
+            
+            // Add semantically relevant tools
+            relevantTools.forEach(tool => {
+                const toolName = tool.name || tool.id || 'unknown_tool';
+                allRelevantTools.add(toolName);
+                log(`[Tools] Added semantic tool: ${toolName}`);
+            });
+            
+            // Add keyword-matched tools (prioritize higher matches)
+            keywordMatches
+                .sort((a, b) => b.matchCount - a.matchCount)
+                .slice(0, 3) // Top 3 keyword matches
+                .forEach(match => {
+                    allRelevantTools.add(match.toolName);
+                    log(`[Tools] Added keyword tool: ${match.toolName}`);
+                });
+
+            log(`[Tools] All relevant tools: ${Array.from(allRelevantTools).join(', ')}`);
+
+            // Get tool descriptions for all relevant tools
+            const finalToolDescriptions = [];
+            
+            // Try to get descriptions from semantic search results first
+            const semanticToolMap = new Map(relevantTools.map(tool => [tool.name || tool.id, tool]));
+            
+            for (const toolName of allRelevantTools) {
+                if (semanticToolMap.has(toolName)) {
+                    // Use semantic search result
+                    const tool = semanticToolMap.get(toolName);
+                    finalToolDescriptions.push({
+                        name: tool.name || toolName,
+                        description: tool.description,
+                        parameters: tool.parameters || {}
+                    });
+                    log(`[Tools] Using semantic description for: ${toolName}`);
+                } else {
+                    // For keyword-matched tools not in semantic results, 
+                    // we should have static descriptions available
+                    const staticDescriptions = this._getStaticToolDescriptions();
+                    if (staticDescriptions[toolName]) {
+                        finalToolDescriptions.push(staticDescriptions[toolName]);
+                        log(`[Tools] Using static description for: ${toolName}`);
+                    } else {
+                        log(`[Tools] No description found for: ${toolName}`);
+                    }
+                }
+            }
+
+            if (finalToolDescriptions.length === 0) {
+                log('[Tools] No final tool descriptions found');
+                return '';
+            }
+
+            log(`Selected ${finalToolDescriptions.length} relevant tools: ${finalToolDescriptions.map(t => t.name).join(', ')}`);
+
+            // Create tool descriptions object for the prompt assembler
+            return {
+                descriptions: finalToolDescriptions,
+                metadata: {
+                    query: text,
+                    semantic_matches: relevantTools.length,
+                    keyword_matches: keywordMatches.length,
+                    total_tools: finalToolDescriptions.length
+                }
+            };
+
+        } catch (error) {
+            log(`Error getting relevant tools: ${error.message}`);
+            return '';
+        }
+    }
+
+    _getStaticToolDescriptions() {
+        // Static tool descriptions as fallback for keyword-matched tools
+        return {
+            'web_search': {
+                name: 'web_search',
+                description: 'Search the web for current information, news, weather, or any topic that requires real-time data',
+                parameters: {
+                    type: 'object',
+                    properties: {
+                        query: {
+                            type: 'string',
+                            description: 'The search query to find relevant information'
+                        }
+                    },
+                    required: ['query']
+                }
+            },
+            'fetch_web_content': {
+                name: 'fetch_web_content',
+                description: 'Fetch and extract content from specific web URLs',
+                parameters: {
+                    type: 'object',
+                    properties: {
+                        urls: {
+                            type: 'array',
+                            items: { type: 'string' },
+                            description: 'URLs to fetch content from'
+                        }
+                    },
+                    required: ['urls']
+                }
+            },
+            'time_date': {
+                name: 'time_date',
+                description: 'Get current time, date, or perform time-related calculations',
+                parameters: {
+                    type: 'object',
+                    properties: {
+                        action: {
+                            type: 'string',
+                            description: 'Action to perform: current_time, current_date, or calculate'
+                        }
+                    },
+                    required: ['action']
+                }
+            },
+            'system_settings': {
+                name: 'system_settings',
+                description: 'Adjust system settings like volume, brightness, or other system configurations',
+                parameters: {
+                    type: 'object',
+                    properties: {
+                        action: {
+                            type: 'string',
+                            description: 'Setting to adjust'
+                        }
+                    },
+                    required: ['action']
+                }
+            }
+        };
     }
 }
 
@@ -1468,7 +1631,12 @@ class LLMChatBox {
                 };
                 
                 // Process the memory asynchronously
-                this._providerAdapter._processMessageForMemory(fullExchangeText, context)
+                this._providerAdapter._processMessageForMemory(
+                    this._sessionId || 'default',
+                    text,
+                    response.text,
+                    this._settings.get_string('service-provider')
+                )
                     .then(memories => {
                         if (memories && memories.length > 0) {
                             log(`Processed ${memories.length} memories for the exchange`);
@@ -1628,16 +1796,79 @@ class LLMChatBox {
                 });
             });
             
-            const errorMsg = `Detected redundant tool call: ${currentToolInfo}, similar to previous call: ${similarPrevCall}. Using existing results instead.`;
-            log(`[Tools] ${errorMsg}`);
-            this._addMessage(errorMsg, 'system');
-            this._toolCallCount = 0; // Reset counter
+            log(`[Tools] Detected redundant tool call: ${currentToolInfo}, similar to previous call: ${similarPrevCall}. Continuing with synthesis.`);
             
-            // Add a final response that uses the information we have, but don't clear recent calls
-            // so we maintain context about what was already done
-            const finalResponse = `I noticed I was attempting to make a redundant tool call. Based on the information we've already gathered, I'll provide an answer using the existing results.`;
-            this._addMessage(finalResponse, 'ai');
-            return;
+            // Instead of stopping, create a synthesis prompt with existing information
+            const synthesisPrompt = `I notice you're trying to gather more information, but I already have sufficient data from previous tool calls to answer the user's question.
+
+PREVIOUS TOOL RESULTS AVAILABLE:
+${this._recentToolCalls.map((calls, idx) => {
+                calls.map(call => {
+                    if (call.name === 'web_search') {
+                        return `• Web search for: "${call.args.query}"`;
+                    } else if (call.name === 'fetch_web_content') {
+                        const urls = Array.isArray(call.args.urls) ? call.args.urls : [call.args.urls];
+                        return `• Fetched content from ${urls.length} URL(s)`;
+                    } else {
+                        return `• ${call.name} executed`;
+                    }
+                }).join('\n')
+            }).join('\n')}
+
+The information gathering phase is complete. Please provide a comprehensive answer to the user's original question using the information that was already collected. Do not make any additional tool calls - synthesize and present the information clearly.
+
+Focus on giving the user a direct, helpful response based on what we've already gathered.`;
+            
+            // Make a synthesis request instead of stopping
+            this._addMessage("I have all the information needed. Let me provide you with a comprehensive answer...", 'assistant', true);
+            
+            this._providerAdapter.makeRequest(synthesisPrompt, false) // Disable tools for synthesis
+                .then(response => {
+                    // Remove the temporary message
+                    const children = this._messageContainer.get_children();
+                    const lastChild = children[children.length - 1];
+                    if (lastChild && lastChild._isThinking) {
+                        this._messageContainer.remove_child(lastChild);
+                    }
+                    
+                    // Show the synthesis response
+                    this._addMessage(response.text || "Based on the information gathered, I can provide you with the answer you're looking for.", 'ai');
+                    
+                    // Process memories for the complete exchange
+                    const fullExchangeText = `User Query: ${this._lastUserQuery}\n\nAI Response: ${response.text}`;
+                    const context = {
+                        query: this._lastUserQuery,
+                        provider: this._settings.get_string('service-provider'),
+                        conversation_history: this._getConversationHistory(),
+                        tool_history: this._recentToolCalls,
+                        is_complete_exchange: true
+                    };
+                    
+                    this._providerAdapter._processMessageForMemory(
+                        this._sessionId || 'default',
+                        this._lastUserQuery,
+                        response.text,
+                        this._settings.get_string('service-provider')
+                    ).catch(error => {
+                        log(`Error processing memories: ${error.message}`);
+                    });
+                    
+                    // Reset counters
+                    this._toolCallCount = 0;
+                    this._recentToolCalls = [];
+                })
+                .catch(error => {
+                    // Remove the temporary message
+                    const children = this._messageContainer.get_children();
+                    const lastChild = children[children.length - 1];
+                    if (lastChild && lastChild._isThinking) {
+                        this._messageContainer.remove_child(lastChild);
+                    }
+                    
+                    this._addMessage(`I encountered an issue while synthesizing the response: ${error.message}`, 'system');
+                });
+                
+            return; // Exit early to prevent further tool processing
         }
 
         // Add current call to recent calls with proper formatting
@@ -1752,7 +1983,7 @@ class LLMChatBox {
                     }).join('\n\n');
 
                     // Make the follow-up prompt more directive for the LLM
-                    const followUpPrompt = `IMPORTANT: I have already gathered all the necessary information using tools. Here are the complete results:
+                    const followUpPrompt = `I have gathered all the necessary information using tools. Here are the complete results:
 
 ${toolResultsText}
 
@@ -1760,16 +1991,25 @@ CURRENT TOOL CALL SEQUENCE: ${this._recentToolCalls.map((calls, idx) =>
     `[Set ${idx+1}] ` + calls.map(call => `${call.name}("${JSON.stringify(call.args).substring(0, 40)}...")`).join(", ")
 ).join(" → ")}
 
-CRITICAL INSTRUCTIONS FOR RESPONSE:
-- This information is SUFFICIENT to answer the user's question completely
-- You MUST use the existing tool results above - DO NOT request more data
-- ⚠️ Any attempt to make a new web search or other tool call will be REJECTED
-- ⚠️ I have detected multiple redundant searches already - DO NOT continue this pattern
-- If you find the existing information incomplete, work with what you have
-- All necessary information is contained in the tool results above
-- Synthesize a complete, coherent answer SOLELY from the information provided
+⚠️ CRITICAL INSTRUCTIONS - READ CAREFULLY:
+1. You have ALL the information needed to answer the user's question above
+2. DO NOT make any new tool calls - the data gathering phase is COMPLETE
+3. Your job now is to SYNTHESIZE and PRESENT the information clearly
+4. Tool usage is DISABLED for this response - focus on analysis and presentation
+5. Structure your response to:
+   - Start with a direct answer to the user's question
+   - Include relevant details from the tool results above
+   - Cite sources when appropriate (URLs from the results)
+   - End with a clear conclusion
+6. Make your response:
+   - Complete and comprehensive using the data above
+   - Well-organized and easy to follow
+   - Based solely on the tool results provided
+   - Free of requests for additional information
 
-Please provide your final answer now using ONLY the tool results above.`;
+REMEMBER: You are in SYNTHESIS MODE - no more data gathering needed.
+
+Please provide your final answer now using ONLY the information gathered above.`;
                     
                     log(`[Tools] Making follow-up request with tool results and instructions for next steps`);
                     
@@ -1843,7 +2083,14 @@ Please provide your final answer now using ONLY the tool results above.`;
                                     conversation_history: this._getConversationHistory(),
                                     is_complete_exchange: true
                                 };
-                                this._providerAdapter._processMessageForMemory(fullExchangeText, context);
+                                this._providerAdapter._processMessageForMemory(
+                                    this._sessionId || 'default',
+                                    this._lastUserQuery,
+                                    response.text,
+                                    this._settings.get_string('service-provider')
+                                ).catch(error => {
+                                    log(`Error processing memories: ${error.message}`);
+                                });
                                 
                                 // Reset counters
                                 this._toolCallCount = 0;
