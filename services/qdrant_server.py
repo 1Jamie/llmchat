@@ -18,6 +18,12 @@ from qdrant_client.http.models import Distance, VectorParams
 from qdrant_client.http.exceptions import UnexpectedResponse
 import uuid
 from socket import error as socket_error
+from llama_cpp import Llama
+import numpy as np
+import requests
+from tqdm import tqdm
+import subprocess
+import pkg_resources
 
 # Configure logging
 log_dir = os.path.expanduser("~/.local/share/gnome-shell/extensions/llmchat@charja113.gmail.com/logs")
@@ -80,6 +86,128 @@ model = None
 model_name = 'all-MiniLM-L6-v2'  # Smaller, faster model
 model_lock = threading.Lock()
 
+# Initialize LLM
+llm = None
+llm_lock = threading.Lock()
+LLM_MODEL_PATH = os.path.expanduser("~/.local/share/gnome-shell/extensions/llmchat@charja113.gmail.com/models/qwen-0.6b.gguf")
+
+def download_file(url, destination):
+    """Download a file with progress bar"""
+    try:
+        response = requests.get(url, stream=True)
+        response.raise_for_status()
+        
+        # Get total file size
+        total_size = int(response.headers.get('content-length', 0))
+        
+        # Create progress bar
+        progress_bar = tqdm(total=total_size, unit='iB', unit_scale=True)
+        
+        # Create directory if it doesn't exist
+        os.makedirs(os.path.dirname(destination), exist_ok=True)
+        
+        # Download file with progress bar
+        with open(destination, 'wb') as f:
+            for chunk in response.iter_content(chunk_size=8192):
+                if chunk:
+                    f.write(chunk)
+                    progress_bar.update(len(chunk))
+        
+        progress_bar.close()
+        return True
+    except Exception as e:
+        logger.error(f"Error downloading file: {str(e)}")
+        return False
+
+def load_llm():
+    """Load the Qwen LLM model"""
+    global llm
+    try:
+        if not os.path.exists(LLM_MODEL_PATH):
+            logger.info(f"LLM model not found at {LLM_MODEL_PATH}, downloading...")
+            model_url = "https://huggingface.co/unsloth/Qwen3-0.6B-GGUF/resolve/main/Qwen3-0.6B-Q4_0.gguf"
+            if download_file(model_url, LLM_MODEL_PATH):
+                logger.info("Model downloaded successfully")
+            else:
+                logger.error("Failed to download model")
+            return None
+            
+        logger.info(f"Loading LLM model from {LLM_MODEL_PATH}")
+        llm = Llama(
+            model_path=LLM_MODEL_PATH,
+            n_ctx=2048,  # Context window
+            n_threads=4,  # Number of CPU threads to use
+            n_gpu_layers=0  # No GPU acceleration by default
+        )
+        logger.info("LLM model loaded successfully")
+        return llm
+    except Exception as e:
+        logger.error(f"Error loading LLM model: {str(e)}")
+        logger.error(traceback.format_exc())
+        return None
+
+def process_memory_with_llm(text, context=None):
+    """Process memory text with LLM to extract key information and generate multiple memories"""
+    global llm
+    if not llm:
+        with llm_lock:
+            if not llm:
+                llm = load_llm()
+                if not llm:
+                    return [text]  # Return original text as single memory if LLM fails to load
+    
+    try:
+        # Create prompt for memory processing
+        prompt = f"""Process the following memory and extract multiple key pieces of information.
+        Format the output as a list of clear, concise summaries, each on a new line.
+        Each summary should capture a distinct aspect or insight from the memory.
+        
+        Memory: {text}
+        
+        Context: {json.dumps(context) if context else 'No additional context'}
+        
+        Summaries:
+        1. """
+        
+        # Generate response
+        response = llm(
+            prompt,
+            max_tokens=1024,  # Increased token limit for multiple memories
+            temperature=0.3,
+            stop=["Memory:", "Context:", "Summaries:"],
+            echo=False
+        )
+        
+        # Extract the generated text
+        processed_text = response['choices'][0]['text'].strip()
+        
+        # If processing failed or returned empty, return original text as single memory
+        if not processed_text:
+            return [text]
+            
+        # Split the response into individual memories
+        memories = []
+        for line in processed_text.split('\n'):
+            line = line.strip()
+            if line and not line.startswith(('1.', '2.', '3.', '4.', '5.')):
+                memories.append(line)
+            elif line:
+                # Remove numbering and add to memories
+                memory = line.split('.', 1)[1].strip() if '.' in line else line
+                if memory:
+                    memories.append(memory)
+        
+        # If no valid memories were extracted, return original text as single memory
+        if not memories:
+            return [text]
+            
+        return memories
+        
+    except Exception as e:
+        logger.error(f"Error processing memory with LLM: {str(e)}")
+        logger.error(traceback.format_exc())
+        return [text]  # Return original text as single memory on error
+
 # Initialize Qdrant client
 QDRANT_DIR = os.path.expanduser("~/.local/share/gnome-shell/extensions/llmchat@charja113.gmail.com/qdrant")
 os.makedirs(QDRANT_DIR, exist_ok=True)
@@ -123,7 +251,6 @@ def load_model():
     global model
     try:
         # Check NumPy version
-        import numpy as np
         np_version = np.__version__
         logger.info(f"NumPy version: {np_version}")
         
@@ -196,15 +323,55 @@ def index_documents():
         logger.info(f"Indexing {len(documents)} documents in namespace {namespace}")
 
         # Ensure collection exists
-        ensure_collection(namespace)
+        try:
+            ensure_collection(namespace)
+        except Exception as e:
+            error_msg = f"Failed to ensure collection exists: {str(e)}"
+            logger.error(error_msg)
+            logger.error(traceback.format_exc())
+            return jsonify({
+                'status': 'error',
+                'error': error_msg,
+                'count': 0
+            }), 500
+
+        # Process documents with LLM if they are memories
+        processed_documents = []
+        for doc in documents:
+            try:
+                if namespace == 'memories' or namespace == 'llm_memories':
+                    # Process memory with LLM - now returns a list of memories
+                    processed_memories = process_memory_with_llm(doc['text'], doc.get('context'))
+                    
+                    # Create a new document for each processed memory
+                    for memory in processed_memories:
+                        new_doc = doc.copy()
+                        new_doc['text'] = memory
+                        new_doc['id'] = f"{doc['id']}_{uuid.uuid4().hex[:8]}"  # Generate unique ID for each memory
+                        processed_documents.append(new_doc)
+                else:
+                    processed_documents.append(doc)
+            except Exception as e:
+                logger.warning(f"Error processing document {doc.get('id', 'unknown')}: {str(e)}")
+                processed_documents.append(doc)  # Use original doc if processing fails
 
         # Generate embeddings for all documents
-        texts = [doc['text'] for doc in documents]
-        embeddings = model.encode(texts, show_progress_bar=False)
+        try:
+            texts = [doc['text'] for doc in processed_documents]
+            embeddings = model.encode(texts, show_progress_bar=False)
+        except Exception as e:
+            error_msg = f"Failed to generate embeddings: {str(e)}"
+            logger.error(error_msg)
+            logger.error(traceback.format_exc())
+            return jsonify({
+                'status': 'error',
+                'error': error_msg,
+                'count': 0
+            }), 500
 
         # Create points with UUIDs
         points = []
-        for doc, embedding in zip(documents, embeddings):
+        for doc, embedding in zip(processed_documents, embeddings):
             try:
                 doc_id = str(uuid.uuid5(uuid.NAMESPACE_DNS, doc['id']))
                 point = models.PointStruct(
@@ -214,7 +381,8 @@ def index_documents():
                         'text': doc['text'],
                         'original_id': doc['id'],
                         'namespace': namespace,
-                        'context': doc.get('context', {})
+                        'context': doc.get('context', {}),
+                        'processed': namespace in ['memories', 'llm_memories']  # Flag if LLM processed
                     }
                 )
                 points.append(point)
@@ -223,10 +391,11 @@ def index_documents():
                 continue
 
         if not points:
-            logger.error("No valid points to index")
+            error_msg = "No valid points to index after processing"
+            logger.error(error_msg)
             return jsonify({
                 'status': 'error',
-                'error': 'No valid points to index',
+                'error': error_msg,
                 'count': 0
             }), 400
 
@@ -243,20 +412,22 @@ def index_documents():
                 'message': f'Successfully indexed {len(points)} documents'
             })
         except Exception as e:
-            logger.error(f"Error during upsert: {str(e)}")
+            error_msg = f"Error during upsert: {str(e)}"
+            logger.error(error_msg)
             logger.error(traceback.format_exc())
             return jsonify({
                 'status': 'error',
-                'error': f'Error during upsert: {str(e)}',
+                'error': error_msg,
                 'count': 0
             }), 500
 
     except Exception as e:
-        logger.error(f"Error in index_documents: {str(e)}")
+        error_msg = f"Error in index_documents: {str(e)}"
+        logger.error(error_msg)
         logger.error(traceback.format_exc())
         return jsonify({
             'status': 'error',
-            'error': str(e),
+            'error': error_msg,
             'count': 0
         }), 500
 
@@ -464,6 +635,36 @@ def signal_handler(signum, frame):
     """Handle shutdown signals"""
     logger.info("Received shutdown signal")
     sys.exit(0)
+
+def check_and_install_dependencies():
+    """Check and install required dependencies"""
+    required_packages = {
+        'requests': 'requests',
+        'tqdm': 'tqdm'
+    }
+    
+    missing_packages = []
+    for package, pip_name in required_packages.items():
+        try:
+            pkg_resources.require(package)
+        except (pkg_resources.DistributionNotFound, pkg_resources.VersionConflict):
+            missing_packages.append(pip_name)
+    
+    if missing_packages:
+        logger.info(f"Installing missing dependencies: {', '.join(missing_packages)}")
+        try:
+            subprocess.check_call([sys.executable, '-m', 'pip', 'install'] + missing_packages)
+            logger.info("Dependencies installed successfully")
+        except subprocess.CalledProcessError as e:
+            logger.error(f"Failed to install dependencies: {str(e)}")
+            return False
+    
+    return True
+
+# Check dependencies before starting
+if not check_and_install_dependencies():
+    logger.error("Failed to install required dependencies")
+    sys.exit(1)
 
 if __name__ == '__main__':
     # Register signal handlers

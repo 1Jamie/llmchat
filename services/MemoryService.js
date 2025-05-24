@@ -31,6 +31,7 @@ var MemoryService = GObject.registerClass({
     static serverProcess = null;
     static initializationPromise = null;
     static isInitializing = false;
+    static initializationListeners = new Set();
 
     static getInstance() {
         if (!MemoryService.instance) {
@@ -41,13 +42,16 @@ var MemoryService = GObject.registerClass({
 
     _init() {
         super._init();
-        
-        // Initialize properties
         this._initialized = false;
         this._initializationError = null;
-        this._serverUrl = null;
-        this._serverPort = null;
         this._serverProcess = null;
+        this._serverUrl = null;
+        this._serverPort = 5000;
+        this._modelLoaded = false;
+        this._pythonPath = null;
+        this._venvPath = null;
+        this._venvPythonPath = null;
+        this._venvPipPath = null;
         this._toolDescriptions = [];
         this._indexedDescriptions = null;
         this._httpSession = new Soup.Session();
@@ -62,77 +66,566 @@ var MemoryService = GObject.registerClass({
                 this._handleReindexTrigger();
             }
         });
-        
-        // Only start initialization if not already initializing and not initialized
-        if (!MemoryService.isInitializing && !this._initialized) {
-            MemoryService.isInitializing = true;
-            GLib.timeout_add(GLib.PRIORITY_DEFAULT, 0, () => {
-                this._startInitialization().catch(e => {
-                    log(`Error during initialization: ${e.message}`);
-                    this._initializationError = e;
-                }).finally(() => {
-                    MemoryService.isInitializing = false;
-                });
-                return GLib.SOURCE_REMOVE;
-            });
-        }
     }
 
-    async _startInitialization() {
-        // If already initialized, return immediately
+    async initialize() {
+        // If already initialized successfully, return immediately
         if (this._initialized) {
-            log('Memory service already initialized');
-            return;
+            return Promise.resolve();
         }
 
-        // If there's an initialization error, throw it
+        // If there's a previous initialization error, clear it
         if (this._initializationError) {
-            throw this._initializationError;
+            this._initializationError = null;
         }
 
-        // If another initialization is in progress, wait for it
+        // If already initializing, wait for the existing initialization
         if (MemoryService.isInitializing && MemoryService.initializationPromise) {
-            log('Waiting for existing initialization to complete');
             return MemoryService.initializationPromise;
         }
 
-        // Create a new initialization promise
-        MemoryService.initializationPromise = (async () => {
-            try {
-                // Find Python path asynchronously
-                const pythonPath = await this._findPythonPath();
-                if (!pythonPath) {
-                    throw new Error('Python 3 not found');
-                }
-                log(`Found Python at: ${pythonPath}`);
-                this._pythonPath = pythonPath;
-                
-                // Check if we need to install dependencies
-                if (await this._needsDependencyInstallation()) {
-                    log('Dependencies need installation, starting async installation...');
-                    this._startAsyncDependencyInstallation();
-                    
-                    // Wait for dependencies to be installed
-                    await this._waitForDependencyInstallation();
-                    log('Dependencies installation completed');
-                }
-                
-                // Start server asynchronously
-                await this._startServer();
-                
-                // Load tools asynchronously
-                await this._loadTools();
-                
+        // Start new initialization
+        MemoryService.isInitializing = true;
+        MemoryService.initializationPromise = this._startInitialization()
+            .then(() => {
                 this._initialized = true;
-                log('Memory service initialized successfully');
-            } catch (e) {
-                log(`Error in _startInitialization: ${e.message}`);
-                this._initializationError = e;
-                throw e;
-            }
-        })();
+                // Notify all listeners
+                MemoryService.initializationListeners.forEach(listener => {
+                    try {
+                        listener();
+                    } catch (e) {
+                        log(`Error in initialization listener: ${e.message}`);
+                    }
+                });
+                MemoryService.initializationListeners.clear();
+            })
+            .catch(error => {
+                this._initializationError = error;
+                throw error;
+            })
+            .finally(() => {
+                MemoryService.isInitializing = false;
+                MemoryService.initializationPromise = null;
+            });
 
         return MemoryService.initializationPromise;
+    }
+
+    addInitializationListener(listener) {
+        if (this._initialized) {
+            listener();
+        } else {
+            MemoryService.initializationListeners.add(listener);
+        }
+    }
+
+    removeInitializationListener(listener) {
+        MemoryService.initializationListeners.delete(listener);
+    }
+
+    async _startInitialization() {
+        try {
+            // Find Python path
+                const pythonPath = await this._findPythonPath();
+                if (!pythonPath) {
+                throw new Error('Python not found');
+                }
+                this._pythonPath = pythonPath;
+            log(`Found Python at: ${pythonPath}`);
+            
+            // Create and activate virtual environment
+            await this._setupVirtualEnv();
+            
+            // Install dependencies
+            await this._installDependencies();
+            
+            // Start server only after dependencies are installed
+                await this._startServer();
+                
+            // Don't set _initialized here - it's set in _waitForServer when health check passes
+            log('Server startup process completed');
+            
+        } catch (error) {
+            log(`Error in _startInitialization: ${error.message}`);
+            this._initializationError = error;
+            this.emit('server-error', { message: error.message });
+            throw error;
+        }
+    }
+
+    async _installDependencies() {
+        try {
+            // Install dependencies one by one with specific order and error handling
+            const dependencies = [
+                { name: 'numpy', version: 'numpy>=1.21.6,<1.28.0', timeout: 120000, required: true },
+                { name: 'flask', version: 'flask>=2.0.1', timeout: 60000, required: true },
+                { name: 'qdrant-client', version: 'qdrant-client>=1.1.1', timeout: 60000, required: true },
+                { name: 'requests', version: 'requests>=2.31.0', timeout: 60000, required: true },
+                { name: 'torch', version: 'torch>=2.0.0+cpu --index-url https://download.pytorch.org/whl/cpu', timeout: 180000, required: false },
+                { name: 'sentence-transformers', version: 'sentence-transformers>=2.2.2', timeout: 120000, required: false }
+            ];
+            
+            for (const dep of dependencies) {
+                try {
+                    // Check if package is already installed first
+                    log(`Checking if ${dep.name} is installed...`);
+                    const result = await this._runAsyncCommand([this._venvPythonPath, '-m', 'pip', 'show', dep.name]);
+                    
+                    if (result.error) {
+                        log(`${dep.name} not installed, will install it`);
+                        this.emit('dependency-installation', { message: `Installing ${dep.name}...` });
+                        await this._runAsyncCommandWithTimeout(
+                            [this._venvPythonPath, '-m', 'pip', 'install', dep.version],
+                            dep.timeout
+                        );
+                        log(`Successfully installed ${dep.name}`);
+                    } else {
+                        log(`${dep.name} already installed`);
+                    }
+                } catch (error) {
+                    if (dep.required) {
+                        throw new Error(`Failed to install required dependency ${dep.name}: ${error.message}`);
+                    } else {
+                        log(`Warning: Failed to install optional dependency ${dep.name}: ${error.message}`);
+                    }
+                }
+            }
+            
+            log('All dependencies installed successfully');
+        } catch (error) {
+            log(`Error installing dependencies: ${error.message}`);
+            throw error;
+        }
+    }
+
+    async _setupVirtualEnv() {
+        const venvPath = `${GLib.get_home_dir()}/.local/share/gnome-shell/extensions/llmchat@charja113.gmail.com/venv`;
+        this._venvPath = venvPath;
+        
+        try {
+            // Check if venv exists and create it if it doesn't
+            if (!GLib.file_test(venvPath, GLib.FileTest.EXISTS)) {
+                log('Creating virtual environment...');
+                await this._runAsyncCommand([this._pythonPath, '-m', 'venv', venvPath]);
+                log('Virtual environment created successfully');
+            } else {
+                log('Virtual environment already exists');
+            }
+            
+            // Set venv paths AFTER ensuring venv exists
+            this._venvPythonPath = `${venvPath}/bin/python3`;
+            this._venvPipPath = `${venvPath}/bin/pip`;
+            
+            // Verify that the venv Python executable exists
+            if (!GLib.file_test(this._venvPythonPath, GLib.FileTest.EXISTS)) {
+                log('Virtual environment Python not found, recreating venv...');
+                // Remove corrupted venv and recreate
+                await this._runAsyncCommand(['rm', '-rf', venvPath]);
+                await this._runAsyncCommand([this._pythonPath, '-m', 'venv', venvPath]);
+                log('Virtual environment recreated successfully');
+            }
+            
+            // Upgrade pip in venv
+            log('Upgrading pip...');
+            await this._runAsyncCommand([this._venvPythonPath, '-m', 'pip', 'install', '--upgrade', 'pip']);
+            
+            // Install dependencies one by one with specific order and error handling
+            const dependencies = [
+                { name: 'numpy', version: 'numpy>=1.21.6,<1.28.0', timeout: 120000, required: true },
+                { name: 'flask', version: 'flask>=2.0.1', timeout: 60000, required: true },
+                { name: 'qdrant-client', version: 'qdrant-client>=1.1.1', timeout: 60000, required: true },
+                { name: 'requests', version: 'requests>=2.31.0', timeout: 60000, required: true },
+                { name: 'torch', version: 'torch>=2.0.0+cpu --index-url https://download.pytorch.org/whl/cpu', timeout: 180000, required: false },
+                { name: 'sentence-transformers', version: 'sentence-transformers>=2.2.2', timeout: 120000, required: false }
+            ];
+            
+            let criticalFailures = [];
+            let optionalFailures = [];
+            
+            for (const dep of dependencies) {
+                try {
+                    // Check if package is already installed first
+                    log(`Checking if ${dep.name} is installed...`);
+                    try {
+                        const checkResult = await this._runAsyncCommandWithTimeout([
+                            this._venvPipPath, 'show', dep.name
+                        ], 10000);
+                        log(`${dep.name} is already installed, skipping`);
+                        continue; // Skip installation if already installed
+                    } catch (checkError) {
+                        log(`${dep.name} not installed, will install it`);
+                    }
+                    
+                    log(`Installing ${dep.name}...`);
+                    if (dep.name === 'torch') {
+                        // Special handling for PyTorch CPU-only version
+                        await this._runAsyncCommandWithTimeout([
+                            this._venvPipPath, 'install',
+                            'torch',
+                            '--index-url', 'https://download.pytorch.org/whl/cpu',
+                            '--no-cache-dir'
+                        ], dep.timeout);
+                    } else {
+                        await this._runAsyncCommandWithTimeout([
+                            this._venvPipPath, 'install',
+                            dep.version,
+                            '--no-cache-dir'
+                        ], dep.timeout);
+                    }
+                    log(`Successfully installed ${dep.name}`);
+                } catch (error) {
+                    log(`Warning: Failed to install ${dep.name}: ${error.message}`);
+                    
+                    if (dep.required) {
+                        criticalFailures.push(dep.name);
+                        // Try alternative installation without version constraints for required packages
+                        try {
+                            log(`Trying alternative installation for required package ${dep.name}...`);
+                            await this._runAsyncCommandWithTimeout([
+                                this._venvPipPath, 'install',
+                                dep.name,
+                                '--no-cache-dir'
+                            ], dep.timeout);
+                            log(`Successfully installed ${dep.name} (alternative)`);
+                            criticalFailures.pop(); // Remove from failures if successful
+                        } catch (altError) {
+                            log(`Failed to install required package ${dep.name} with alternative method: ${altError.message}`);
+                        }
+                    } else {
+                        optionalFailures.push(dep.name);
+                        log(`Skipping optional package ${dep.name}, will continue without it`);
+                    }
+                }
+            }
+            
+            // Check if we have critical failures
+            if (criticalFailures.length > 0) {
+                log(`Critical package installation failures: ${criticalFailures.join(', ')}`);
+                log('Some core functionality may not work properly');
+            }
+            
+            if (optionalFailures.length > 0) {
+                log(`Optional package installation failures: ${optionalFailures.join(', ')}`);
+                log('Some advanced features may be disabled');
+            }
+            
+            // Install llama-cpp-python with CPU support
+            log('Checking llama-cpp-python installation...');
+            try {
+                const checkResult = await this._runAsyncCommandWithTimeout([
+                    this._venvPipPath, 'show', 'llama-cpp-python'
+                ], 10000);
+                
+                // Check if package is not installed (output contains "WARNING: Package(s) not found")
+                const isNotInstalled = checkResult.output.includes('WARNING: Package(s) not found') || 
+                                     checkResult.output.includes('Package(s) not found');
+                
+                if (isNotInstalled) {
+                    log('llama-cpp-python not found, installing with CPU support...');
+                    
+                    // Set up environment variables for CPU build
+                    const env = GLib.listenv();
+                    env.push('CMAKE_ARGS="-DLLAMA_BLAS=ON -DLLAMA_BLAS_VENDOR=OpenBLAS"');
+                    
+                    // Install with CPU-specific build flags
+                    const installResult = await this._runAsyncCommandWithTimeout([
+                        this._venvPipPath, 'install',
+                        'llama-cpp-python',
+                        '--no-cache-dir'
+                    ], 600000, env); // 10 minute timeout for build
+                    
+                    if (installResult.error && !installResult.error.includes('WARNING: Package(s) not found')) {
+                        throw new Error(`Installation failed: ${installResult.error}`);
+                    }
+                    
+                    log('Successfully installed llama-cpp-python with CPU support');
+                } else {
+                    log('llama-cpp-python is already installed in venv, skipping installation');
+                }
+            } catch (error) {
+                // Only treat as error if it's not the "package not found" warning
+                if (!error.message.includes('WARNING: Package(s) not found')) {
+                    log(`Failed to install llama-cpp-python: ${error.message}`);
+                    log('Memory processing will be disabled, but other features will work');
+                } else {
+                    // If we get here, we need to install
+                    log('Installing llama-cpp-python with CPU support...');
+                    
+                    // Set up environment variables for CPU build
+                    const env = GLib.listenv();
+                    env.push('CMAKE_ARGS="-DLLAMA_BLAS=ON -DLLAMA_BLAS_VENDOR=OpenBLAS"');
+                    
+                    // Install with CPU-specific build flags
+                    const installResult = await this._runAsyncCommandWithTimeout([
+                        this._venvPipPath, 'install',
+                        'llama-cpp-python',
+                        '--no-cache-dir'
+                    ], 600000, env); // 10 minute timeout for build
+                    
+                    if (installResult.error) {
+                        log(`Failed to install llama-cpp-python: ${installResult.error}`);
+                        log('Memory processing will be disabled, but other features will work');
+                    } else {
+                        log('Successfully installed llama-cpp-python with CPU support');
+                    }
+                }
+            }
+            
+            log('Virtual environment setup complete');
+            
+        } catch (error) {
+            log(`Error setting up virtual environment: ${error.message}`);
+            throw error;
+        }
+    }
+
+    async _startServer() {
+        if (this._serverProcess) {
+            log('Server already running');
+            return;
+        }
+
+        const serverScript = this._getServerScript();
+        if (!serverScript) {
+            throw new Error('Server script not found');
+        }
+
+        try {
+            // Verify venv Python exists
+            if (!this._venvPythonPath || !GLib.file_test(this._venvPythonPath, GLib.FileTest.EXISTS)) {
+                throw new Error('Virtual environment Python not found. Try removing the venv directory and restarting.');
+            }
+
+            // Set server URL immediately since we know the port
+            this._serverUrl = `http://127.0.0.1:${this._serverPort}`;
+            log(`Server URL set to: ${this._serverUrl}`);
+
+            // Get memory verbosity from settings (context window is now fixed in server)
+            const memoryVerbosity = this._settings.get_string('memory-verbosity') || 'balanced';
+
+            // Prepare environment variables for the subprocess
+            let envp = GLib.listenv().map(name => `${name}=${GLib.getenv(name)}`);
+            envp.push(`MEMORY_VERBOSITY=${memoryVerbosity}`);
+
+            // Start the server process using venv Python, passing envp
+            log(`Starting server with Python: ${this._venvPythonPath}`);
+            log(`Server script: ${serverScript}`);
+            log(`Passing MEMORY_VERBOSITY=${memoryVerbosity}`);
+            
+            // Create environment array for subprocess
+            const env = GLib.listenv().reduce((acc, name) => {
+                acc[name] = GLib.getenv(name);
+                return acc;
+            }, {});
+            env['MEMORY_VERBOSITY'] = memoryVerbosity;
+            
+            this._serverProcess = Gio.Subprocess.new(
+                [this._venvPythonPath, serverScript],
+                Gio.SubprocessFlags.STDOUT_PIPE | Gio.SubprocessFlags.STDERR_PIPE
+            );
+
+            if (!this._serverProcess) {
+                throw new Error('Failed to create server process');
+            }
+
+            // Set up output monitoring
+            const stdout = this._serverProcess.get_stdout_pipe();
+            const stderr = this._serverProcess.get_stderr_pipe();
+            
+            if (!stdout || !stderr) {
+                throw new Error('Failed to get server process pipes');
+            }
+
+            const stdoutStream = new Gio.DataInputStream({
+                base_stream: stdout,
+                close_base_stream: true
+            });
+            
+            const stderrStream = new Gio.DataInputStream({
+                base_stream: stderr,
+                close_base_stream: true
+            });
+            
+            this._readOutput(stdoutStream, 'stdout');
+            this._readOutput(stderrStream, 'stderr');
+
+            // Monitor server status
+            this._monitorServerStatus();
+            
+            // Wait for server to be ready with timeout
+            try {
+                await Promise.race([
+                    this._waitForServer(),
+                    new Promise((_, reject) => 
+                        GLib.timeout_add(GLib.PRIORITY_DEFAULT, 30000, () => {
+                            reject(new Error('Server startup timeout after 30 seconds'));
+                            return GLib.SOURCE_REMOVE;
+                        })
+                    )
+                ]);
+            } catch (e) {
+                // Clean up process on timeout
+                if (this._serverProcess) {
+                    this._serverProcess.force_exit();
+                    this._serverProcess = null;
+                }
+                throw e;
+            }
+            
+            log('Server started successfully');
+        } catch (e) {
+            log(`Error starting server: ${e.message}`);
+            if (this._serverProcess) {
+                try {
+                    this._serverProcess.force_exit();
+                } catch (exitError) {
+                    log(`Error forcing server exit: ${exitError.message}`);
+                }
+                this._serverProcess = null;
+            }
+            throw e;
+        }
+    }
+
+    _readOutput(stream, type) {
+        stream.read_line_async(0, null, (stream, res) => {
+            try {
+                const [line, length] = stream.read_line_finish(res);
+                if (line) {
+                    const text = new TextDecoder().decode(line);
+                    if (type === 'stderr') {
+                        log(`Server error: ${text}`);
+        } else {
+                        log(`Server: ${text}`);
+                        
+                        // Check for server URL
+                        if (text.includes('Running on http://127.0.0.1:')) {
+                            const portMatch = text.match(/Running on http:\/\/127\.0\.0\.1:(\d+)/);
+                            if (portMatch && portMatch[1]) {
+                                this._serverPort = portMatch[1];
+                                this._serverUrl = `http://127.0.0.1:${this._serverPort}`;
+                                log(`Server URL set to: ${this._serverUrl}`);
+                            }
+                        }
+                        
+                        // Check for model loaded message
+                        if (text.includes('Model loaded successfully')) {
+                            this._modelLoaded = true;
+                            log('Model loaded successfully');
+                        }
+                        
+                        // Check for dependency installation messages
+                        if (text.includes('Installing') || text.includes('Successfully installed')) {
+                            this._emit('dependency-installation', { message: text.trim() });
+                        }
+                    }
+                    
+                    // Continue reading
+                    this._readOutput(stream, type);
+                }
+            } catch (e) {
+                log(`Error reading ${type}: ${e.message}`);
+            }
+        });
+    }
+
+    _monitorServerStatus() {
+        if (!this._serverProcess) return;
+        
+        this._serverProcess.wait_async(null, (process, res) => {
+            try {
+                process.wait_finish(res);
+                // If we get here, the process has exited
+                const exitStatus = this._serverProcess.get_exit_status();
+                log(`Server process exited with status ${exitStatus}`);
+                this._serverProcess = null;
+                this._emit('server-error', { message: `Server process exited with status ${exitStatus}` });
+            } catch (e) {
+                log(`Error monitoring server: ${e.message}`);
+                this._serverProcess = null;
+                this._emit('server-error', { message: e.message });
+            }
+        });
+    }
+
+    async _waitForServer() {
+        if (!this._serverProcess) {
+            log('Server process not running');
+            return;
+        }
+
+        return new Promise((resolve, reject) => {
+            let attempts = 0;
+            const maxAttempts = 30; // 30 seconds timeout
+            
+            const checkServerStatus = () => {
+                if (!this._serverProcess) {
+                    reject(new Error('Server process terminated'));
+                return;
+            }
+
+                attempts++;
+                if (attempts > maxAttempts) {
+                    reject(new Error('Server startup timeout'));
+                    return;
+                }
+
+                // Check if server is responding by trying a health check
+                this._checkServerHealth()
+                    .then((isHealthy) => {
+                        if (isHealthy) {
+                            log('Server is healthy and responding');
+                            // Set the initialized flag here when server is confirmed working
+                            this._initialized = true;
+                            this._isInitializing = false;
+                            log('Memory service marked as initialized');
+                            resolve();
+                        } else {
+                            // Continue checking
+                            GLib.timeout_add(GLib.PRIORITY_DEFAULT, 1000, () => {
+                                checkServerStatus();
+                                return GLib.SOURCE_REMOVE;
+                            });
+                        }
+                    })
+                    .catch((error) => {
+                        // Continue checking on error (server might still be starting)
+                        GLib.timeout_add(GLib.PRIORITY_DEFAULT, 1000, () => {
+                            checkServerStatus();
+                            return GLib.SOURCE_REMOVE;
+                        });
+                    });
+            };
+            
+            // Start checking immediately
+            checkServerStatus();
+        });
+    }
+
+    async _checkServerHealth() {
+        return new Promise((resolve) => {
+            try {
+                const message = Soup.Message.new('GET', 'http://127.0.0.1:5000/health');
+                message.request_headers.append('Content-Type', 'application/json');
+                
+                // Use a session for the request
+                const session = new Soup.Session();
+                session.queue_message(message, (session, msg) => {
+                    if (msg.status_code === 200) {
+                        try {
+                            const response = JSON.parse(msg.response_body.data);
+                            resolve(response.status === 'healthy');
+                        } catch (e) {
+                            resolve(false);
+                        }
+                        } else {
+                        resolve(false);
+                    }
+                });
+        } catch (e) {
+                resolve(false);
+            }
+        });
     }
 
     async _findPythonPath() {
@@ -158,439 +651,21 @@ var MemoryService = GObject.registerClass({
         });
     }
 
-    async _startServer() {
-        if (this._serverProcess) {
-            log('Server already running');
-            return;
-        }
-
-        return new Promise((resolve, reject) => {
-            GLib.timeout_add(GLib.PRIORITY_DEFAULT, 0, () => {
-                try {
-                    const serverScript = this._getServerScript();
-                    const launcher = new Gio.SubprocessLauncher({
-                        flags: Gio.SubprocessFlags.STDOUT_PIPE | Gio.SubprocessFlags.STDERR_PIPE
-                    });
-                    
-                    this._serverProcess = launcher.spawnv([this._pythonPath, serverScript]);
-                    
-                    // Set up output monitoring
-                    const stdout = this._serverProcess.get_stdout_pipe();
-                    const stderr = this._serverProcess.get_stderr_pipe();
-                    
-                    let serverUrlFound = false;
-                    let modelLoaded = false;
-                    
-                    if (stdout) {
-                        const stdoutStream = new Gio.DataInputStream({
-                            base_stream: stdout,
-                            close_base_stream: true
-                        });
-                        
-                        const readLine = () => {
-                            stdoutStream.read_line_async(GLib.PRIORITY_DEFAULT, null, (stream, res) => {
-                                try {
-                                    const [line] = stream.read_line_finish(res);
-                                    if (line) {
-                                        //convert to string
-                                        let strLine = line.toString();
-                                        // Only log important server output
-                                        if (strLine.indexOf('Running on') !== -1 || 
-                                            strLine.indexOf('Model loaded') !== -1 || 
-                                            strLine.indexOf('ERROR') !== -1) {
-                                            log(`Server: ${strLine}`);
-                                        }
-                                        // Check for server URL
-                                        if (strLine.indexOf('Running on http://127.0.0.1:') !== -1) {
-                                            serverUrlFound = true;
-                                            // Extract the port number and set the server URL
-                                            const portMatch = strLine.match(/Running on http:\/\/127\.0\.0\.1:(\d+)/);
-                                            if (portMatch && portMatch[1]) {
-                                                this._serverPort = portMatch[1];
-                                                this._serverUrl = `http://127.0.0.1:${this._serverPort}`;
-                                                log(`Server URL set to: ${this._serverUrl}`);
-                                            }
-                                            log('Server URL found');
-                                        }
-                                        
-                                        // Check for model loaded message using indexOf
-                                        if (strLine.indexOf('Model loaded successfully') !== -1) {
-                                            modelLoaded = true;
-                                            this._modelLoaded = true; // Set the instance flag
-                                            log('Model loaded successfully');
-                                            
-                                            // Only resolve if both conditions are met
-                                            if (serverUrlFound && modelLoaded) {
-                                                log('Server fully initialized');
-                                                    resolve();
-                                            }
-                                        }
-                                        
-                                        // Continue reading output
-                                        readLine();
-                                    }
-                                } catch (e) {
-                                    log(`Error reading stdout: ${e.message}`);
-                                }
-                            });
-                        };
-                        
-                        readLine();
-                    }
-                    
-                    if (stderr) {
-                        const stderrStream = new Gio.DataInputStream({
-                            base_stream: stderr,
-                            close_base_stream: true
-                        });
-                        
-                        const readError = () => {
-                            stderrStream.read_line_async(GLib.PRIORITY_DEFAULT, null, (stream, res) => {
-                                try {
-                                    const [line] = stream.read_line_finish(res);
-                                    if (line) {
-                                        log(`Server error: ${line}`);
-                                        readError();
-                                    }
-                                } catch (e) {
-                                    log(`Error reading stderr: ${e.message}`);
-                                }
-                            });
-                        };
-                        
-                        readError();
-                    }
-                    
-                    // Check if process exited
-                    this._serverProcess.wait_async(null, (proc, res) => {
-                        try {
-                            const exitStatus = proc.wait_finish(res);
-                            if (exitStatus !== 0) {
-                                reject(new Error(`Server process exited with status ${exitStatus}`));
-                            }
-                        } catch (e) {
-                            reject(new Error(`Error waiting for server process: ${e.message}`));
-                        }
-                    });
-                } catch (e) {
-                    reject(new Error(`Failed to start server: ${e.message}`));
-                }
-                
-                return GLib.SOURCE_REMOVE;
-            });
-        });
-    }
-
-    async _needsDependencyInstallation() {
-        try {
-            // Check if virtual environment exists
-            const venvPath = GLib.build_filenamev([Me.path, 'venv']);
-            if (!GLib.file_test(venvPath, GLib.FileTest.EXISTS)) {
-                log('Virtual environment not found');
-                return true;
-            }
-
-            // Check if venv python exists
-            const venvPython = GLib.build_filenamev([Me.path, 'venv', 'bin', 'python3']);
-            if (!GLib.file_test(venvPython, GLib.FileTest.EXISTS)) {
-                log('Virtual environment python not found');
-                return true;
-            }
-
-            // Try to check if dependencies are working
-            try {
-                const checkCmd = `${venvPython} -c "import numpy; import sentence_transformers; print('OK')"`;
-                const [success, stdout, stderr, exitStatus] = GLib.spawn_command_line_sync(checkCmd);
-                
-                if (!success || exitStatus !== 0 || !stdout || stdout.toString().indexOf('OK') === -1) {
-                    log('Dependencies check failed, need installation');
-                    return true;
-                }
-                
-                log('Dependencies appear to be working');
-                this._pythonPath = venvPython; // Set the venv python path
-                return false;
-            } catch (e) {
-                log(`Error checking dependencies: ${e.message}`);
-                return true;
-            }
-        } catch (error) {
-            log(`Error in _needsDependencyInstallation: ${error.message}`);
-            return true;
-        }
-    }
-
-    async _waitForDependencyInstallation() {
-        return new Promise((resolve, reject) => {
-            let attempts = 0;
-            const maxAttempts = 300; // Wait up to 5 minutes for CPU-only packages
-            
-            const checkInstallation = () => {
-                attempts++;
-                
-                // Check if dependencies are now working
-                const venvPython = GLib.build_filenamev([Me.path, 'venv', 'bin', 'python3']);
-                if (GLib.file_test(venvPython, GLib.FileTest.EXISTS)) {
-                    try {
-                        const checkCmd = `${venvPython} -c "import numpy; import sentence_transformers; print('OK')"`;
-                        const [success, stdout, stderr, exitStatus] = GLib.spawn_command_line_sync(checkCmd);
-                        
-                        if (success && exitStatus === 0 && stdout && stdout.toString().indexOf('OK') !== -1) {
-                            log('Dependencies installation verified');
-                            this._pythonPath = venvPython; // Set the venv python path
-                            resolve();
-                            return;
-                        }
-                    } catch (e) {
-                        // Continue checking
-                    }
-                }
-                
-                if (attempts >= maxAttempts) {
-                    reject(new Error('Dependency installation timeout after 5 minutes'));
-                    return;
-                }
-                
-                // Check again in 1 second
-                GLib.timeout_add(GLib.PRIORITY_DEFAULT, 1000, () => {
-                    checkInstallation();
-                    return GLib.SOURCE_REMOVE;
-                });
-            };
-            
-            checkInstallation();
-        });
-    }
-
-    _startAsyncDependencyInstallation() {
-        // Create virtual environment if it doesn't exist
-        const venvPath = GLib.build_filenamev([Me.path, 'venv']);
-        if (!GLib.file_test(venvPath, GLib.FileTest.EXISTS)) {
-            log('Creating virtual environment...');
-            this._runAsyncCommand(
-                `${this._pythonPath} -m venv ${venvPath}`,
-                () => {
-                    log('Virtual environment created successfully');
-                    this._upgradePip();
-                },
-                (error) => {
-                    log(`Failed to create virtual environment: ${error}`);
-                }
-            );
-        } else {
-            this._upgradePip();
-        }
-    }
-
-    _upgradePip() {
-        const venvPython = GLib.build_filenamev([Me.path, 'venv', 'bin', 'python3']);
-        log('Upgrading pip...');
-        this._runAsyncCommand(
-            `${venvPython} -m pip install --upgrade pip`,
-            () => {
-                log('Pip upgraded successfully');
-                this._installNumpy();
-            },
-            (error) => {
-                log(`Failed to upgrade pip: ${error}`);
-            }
-        );
-    }
-
-    _installNumpy() {
-        const venvPython = GLib.build_filenamev([Me.path, 'venv', 'bin', 'python3']);
-        log('Installing compatible NumPy version...');
-        this._runAsyncCommand(
-            `${venvPython} -m pip install 'numpy>=1.21.6,<1.28.0'`,
-            () => {
-                log('NumPy installed successfully');
-                this._installDependencies();
-            },
-            (error) => {
-                log(`Failed to install NumPy: ${error}`);
-            }
-        );
-    }
-
-    _installDependencies() {
-        const venvPython = GLib.build_filenamev([Me.path, 'venv', 'bin', 'python3']);
-        
-        log('Installing CPU-only PyTorch first...');
-        // Install CPU-only PyTorch first to avoid CUDA dependencies
-        this._runAsyncCommand(
-            `${venvPython} -m pip install torch>=2.0.0,<2.5.0 --index-url https://download.pytorch.org/whl/cpu`,
-            () => {
-                log('CPU-only PyTorch installed successfully');
-                this._installOtherDependencies();
-            },
-            (error) => {
-                log(`Failed to install PyTorch: ${error}`);
-                // Try with a simpler approach
-                this._runAsyncCommand(
-                    `${venvPython} -m pip install torch --index-url https://download.pytorch.org/whl/cpu`,
-                    () => {
-                        log('CPU-only PyTorch installed successfully (fallback)');
-                        this._installOtherDependencies();
-                    },
-                    (error) => {
-                        log(`Failed to install PyTorch (fallback): ${error}`);
-                    }
-                );
-            }
-        );
-    }
-
-    _installOtherDependencies() {
-        const venvPython = GLib.build_filenamev([Me.path, 'venv', 'bin', 'python3']);
-        const requirementsPath = GLib.build_filenamev([Me.path, 'requirements.txt']);
-        
-        if (GLib.file_test(requirementsPath, GLib.FileTest.EXISTS)) {
-            log('Installing other dependencies...');
-            this._runAsyncCommand(
-                `${venvPython} -m pip install --no-cache-dir --upgrade -r ${requirementsPath}`,
-                (output) => {
-                    log(`Other dependencies installed successfully:\n${output}`);
-                    this._verifyInstallation();
-                },
-                (error) => {
-                    log(`Failed to install other dependencies: ${error}`);
-                    // Try without the --no-cache-dir flag as fallback
-                    this._runAsyncCommand(
-                        `${venvPython} -m pip install --upgrade -r ${requirementsPath}`,
-                        (output) => {
-                            log(`Other dependencies installed successfully (fallback):\n${output}`);
-                            this._verifyInstallation();
-                        },
-                        (error) => {
-                            log(`Failed to install other dependencies (fallback): ${error}`);
-                        }
-                    );
-                }
-            );
-                } else {
-            log('No requirements.txt found, skipping other dependencies installation');
-            this._verifyInstallation();
-        }
-    }
-
-    _verifyInstallation() {
-        const venvPython = GLib.build_filenamev([Me.path, 'venv', 'bin', 'python3']);
-        log('Verifying installation...');
-        this._runAsyncCommand(
-            `${venvPython} -c "import numpy; print(f'NumPy version: {numpy.__version__}'); import sentence_transformers; print('OK')"`,
-            (output) => {
-                log(`Installation verified successfully:\n${output}`);
-                this._pythonPath = venvPython;
-                // Don't start server here - let the main initialization flow handle it
-                log('Dependencies installation completed successfully');
-            },
-            (error) => {
-                log(`Failed to verify installation: ${error}`);
-            }
-        );
-    }
-
-    _runAsyncCommand(command, onSuccess, onError) {
-        try {
-            const [success, pid, stdin, stdout, stderr] = GLib.spawn_async_with_pipes(
-                null, // working directory
-                ['/bin/sh', '-c', command], // command
-                null, // environment
-                GLib.SpawnFlags.SEARCH_PATH | GLib.SpawnFlags.DO_NOT_REAP_CHILD,
-                null // child setup function
-            );
-
-            if (!success) {
-                onError('Failed to start command');
-                return;
-            }
-
-            // Set up output monitoring
-            const stdoutStream = new Gio.DataInputStream({
-                base_stream: new Gio.UnixInputStream({ fd: stdout }),
-                close_base_stream: true
-            });
-
-            const stderrStream = new Gio.DataInputStream({
-                base_stream: new Gio.UnixInputStream({ fd: stderr }),
-                close_base_stream: true
-            });
-
-            let stdoutData = '';
-            let stderrData = '';
-
-            const readStream = (stream, data, isStdout) => {
-                stream.read_line_async(GLib.PRIORITY_DEFAULT, null, (stream, res) => {
-                    try {
-                        const [line] = stream.read_line_finish(res);
-                        if (line) {
-                            const strLine = ByteArray.toString(line);
-                            if (isStdout) {
-                                stdoutData += strLine + '\n';
-                                log(`Command output: ${strLine}`);
-            } else {
-                                stderrData += strLine + '\n';
-                                log(`Command error: ${strLine}`);
-                            }
-                            readStream(stream, data, isStdout);
-                        } else {
-                            // End of stream
-                            if (isStdout) {
-                                stream.close(null);
-                            } else {
-                                // Both streams are done, check process exit
-                                GLib.child_watch_add(GLib.PRIORITY_DEFAULT, pid, (pid, status) => {
-                                    if (status === 0) {
-                                        onSuccess(stdoutData);
-                                    } else {
-                                        onError(stderrData || 'Command failed');
-                                    }
-                                    GLib.spawn_close_pid(pid);
-                                });
-                            }
-            }
-        } catch (e) {
-                        log(`Error reading ${isStdout ? 'stdout' : 'stderr'}: ${e.message}`);
-                    }
-                });
-            };
-
-            readStream(stdoutStream, stdoutData, true);
-            readStream(stderrStream, stderrData, false);
-
-        } catch (e) {
-            log(`Error running async command: ${e.message}`);
-            onError(e.message);
-        }
-    }
-
-    async _startServerWithPortFallback() {
-        const maxPortAttempts = 5;
-        let currentPort = this._serverPort;
-        
-        for (let attempt = 0; attempt < maxPortAttempts; attempt++) {
-            try {
-                this._serverPort = currentPort;
-                this._serverUrl = `http://localhost:${this._serverPort}`;
-                await this._startServer();
-                return; // Success
-            } catch (error) {
-                if (error.message.includes('Port') && error.message.includes('in use')) {
-                    log(`Port ${currentPort} is in use, trying next port...`);
-                    currentPort++;
-                    continue;
-                }
-                throw error; // Other errors should be propagated
-            }
-        }
-        
-        throw new Error(`Failed to start server after trying ${maxPortAttempts} ports`);
-    }
-
     async _loadTools() {
         try {
             debug('Loading tools for memory service...');
-            const tools = toolLoader.getTools();
+            
+            // Create tool loader instance if not exists
+            if (!this._toolLoader) {
+                this._toolLoader = new ToolLoader();
+                this._toolLoader.setMemoryService(this);
+            }
+            
+            // Initialize tool loader with proper path
+            const toolsPath = GLib.build_filenamev([Me.path, 'tools']);
+            this._toolLoader.initialize(toolsPath);
+            
+            const tools = this._toolLoader.getTools();
             if (!tools || tools.length === 0) {
                 throw new Error('No tools available to load');
             }
@@ -809,12 +884,11 @@ var MemoryService = GObject.registerClass({
      * @returns {Promise} Promise that resolves to relevant tool descriptions
      */
     async getRelevantToolDescriptions(query, top_k = 3) {
-        if (!this._modelLoaded) {
-            log('Server not running, cannot retrieve tool descriptions');
-            return { descriptions: [], raw_prompt: '', functions: [] };
+        if (!this._initialized) {
+            log('Memory service not initialized, cannot get tool descriptions');
+            return [];
         }
 
-        return new Promise((resolve, reject) => {
             try {
                 const message = Soup.Message.new('POST', `${this._serverUrl}/search`);
                 message.request_headers.append('Content-Type', 'application/json');
@@ -822,110 +896,50 @@ var MemoryService = GObject.registerClass({
                 const payload = JSON.stringify({
                     query,
                     top_k,
-                    namespace: 'tools',  // Only search in tools namespace
-                    min_score: 0.05  // Lower threshold for better recall
+                namespace: 'tools',
+                min_score: 0.1  // Lower threshold for tool descriptions
                 });
                 
                 message.set_request_body_from_bytes('application/json', new GLib.Bytes(payload));
                 
+            return new Promise((resolve, reject) => {
                 this._httpSession.queue_message(message, (session, msg) => {
+                    if (!msg) {
+                        log('HTTP response message is null in getRelevantToolDescriptions');
+                        resolve([]);
+                        return;
+                    }
+                    
                     if (msg.status_code === 200) {
                         try {
                             const response = JSON.parse(msg.response_body.data);
-                            debug(`Search response: ${JSON.stringify(response)}`);
-                            
-                            // Find the corresponding tool descriptions
-                            const relevantDescriptions = response.results.map(result => {
-                                // Extract tool name from the result text
-                                const toolMatch = result.text.match(/^([^:]+):/);
-                                const toolName = toolMatch ? toolMatch[1].trim() : result.id;
-                                
-                                // Find the tool in our loaded tools
-                                const toolDescription = this._toolDescriptions.find(t => t.name === toolName);
-                                if (!toolDescription) {
-                                    log(`Warning: Could not find tool description for ${toolName}`);
-                                }
-                                return toolDescription || null;
-                            }).filter(Boolean);
-
-                            // Check for keyword matches
-                            const lowerQuery = query.toLowerCase();
-                            const keywordMatches = this._toolDescriptions.filter(tool => {
-                                if (!tool.keywords) return false;
-                                return tool.keywords.some(keyword => 
-                                    lowerQuery.includes(keyword.toLowerCase())
-                                );
-                            });
-
-                            // Combine semantic matches with keyword matches, removing duplicates
-                            const allMatches = new Map();
-                            relevantDescriptions.forEach(tool => {
-                                allMatches.set(tool.name, tool);
-                            });
-                            keywordMatches.forEach(tool => {
-                                allMatches.set(tool.name, tool);
-                            });
-
-                            const finalDescriptions = Array.from(allMatches.values());
-                            debug(`Found ${finalDescriptions.length} relevant tools (${relevantDescriptions.length} semantic matches, ${keywordMatches.length} keyword matches)`);
-                            
-                            // Build the raw prompt
-                            const rawPrompt = `You are a helpful assistant with access to the following tools:
-
-${finalDescriptions.map(tool => {
-    let prompt = `Tool: ${tool.name}
-Description: ${tool.description}
-Parameters:`;
-    if (tool.parameters) {
-        Object.entries(tool.parameters).forEach(([name, param]) => {
-            prompt += `\n  - ${name}: ${param.description}`;
-            if (param.enum) {
-                prompt += `\n    Allowed values: ${param.enum.join(', ')}`;
-            }
-        });
-    }
-    return prompt;
-}).join('\n\n')}
-
-CRITICAL INSTRUCTIONS FOR TOOL USAGE:
-1. You MUST respond with ONLY a JSON object when using a tool. No other text, no XML, no explanations.
-2. The JSON object MUST follow this EXACT format:
-   {"tool": "tool_name", "arguments": {"param1": "value1", ...}}
-3. DO NOT use XML tags like <web_search> or any other format
-4. DO NOT use any other formatting or tags like markdown or html.
-5. DO NOT include your thoughts or reasoning
-6. DO NOT include placeholders or waiting messages
-7. If no tool is needed, respond conversationally
-CORRECT EXAMPLE:
-{"tool": "web_search", "arguments": {"query": "weather forecast Memphis"}}
-
-INCORRECT EXAMPLES (DO NOT USE THESE):
-❌ <web_search query="weather forecast">
-❌ {"tool": "web_search"...} [waiting for results]
-
-Remember: Your response must be ONLY the JSON object, nothing else.`;
-
-                            // Developer note: The LLM must respond with a single JSON object as above for tool calls.
-                            resolve({
-                                descriptions: finalDescriptions,
-                                raw_prompt: rawPrompt,
-                                functions: finalDescriptions,
-                                system_message: rawPrompt
-                            });
+                            if (response.status === 'success' && response.results) {
+                                // Convert results to tool descriptions
+                                const tools = response.results.map(result => ({
+                                    name: result.id,
+                                    description: result.text,
+                                    category: result.context?.category || 'general',
+                                    parameters: result.context?.parameters || {}
+                                }));
+                                resolve(tools);
+                            } else {
+                                log('No tool descriptions found in response');
+                                resolve([]);
+                            }
                         } catch (e) {
-                            log(`Error parsing search response: ${e.message}`);
-                            reject(e);
+                            log(`Error parsing tool descriptions response: ${e.message}`);
+                            resolve([]);
                         }
                     } else {
-                        log(`Search request failed with status: ${msg.status_code}`);
-                        reject(new Error(`Search request failed: ${msg.status_code}`));
+                        log(`Failed to get tool descriptions: ${msg.status_code}`);
+                        resolve([]);
                     }
+                });
                 });
             } catch (e) {
                 log(`Error in getRelevantToolDescriptions: ${e.message}`);
-                reject(e);
+            return [];
             }
-        });
     }
 
     /**
@@ -1006,6 +1020,13 @@ Remember: Your response must be ONLY the JSON object, nothing else.`;
                 message.set_request_body_from_bytes('application/json', new GLib.Bytes(payload));
                 
                 this._httpSession.queue_message(message, (session, msg) => {
+                    if (!msg) {
+                        const error = new Error('HTTP response message is null in _getConversationHistory');
+                        log(`Error in _getConversationHistory: ${error.message}`);
+                        reject(error);
+                        return;
+                    }
+                    
                     if (msg.status_code === 200) {
                         try {
                             const response = JSON.parse(msg.response_body.data);
@@ -1049,12 +1070,19 @@ Remember: Your response must be ONLY the JSON object, nothing else.`;
                     query,
                     top_k,
                     namespace: 'llm_memories',
-                    min_score: 0.3
+                    min_score: 0.2
                 });
                 
                 message.set_request_body_from_bytes('application/json', new GLib.Bytes(payload));
                 
                 this._httpSession.queue_message(message, (session, msg) => {
+                    if (!msg) {
+                        const error = new Error('HTTP response message is null in _getLLMMemories');
+                        log(`Error in _getLLMMemories: ${error.message}`);
+                        reject(error);
+                        return;
+                    }
+                    
                     if (msg.status_code === 200) {
                         try {
                             const response = JSON.parse(msg.response_body.data);
@@ -1107,11 +1135,36 @@ Remember: Your response must be ONLY the JSON object, nothing else.`;
             return;
         }
 
+        // Validate input parameters
+        if (!memory) {
+            log('Error in indexMemory: memory parameter is null or undefined');
+            return;
+        }
+
+        if (!memory.text || typeof memory.text !== 'string') {
+            log('Error in indexMemory: memory.text is required and must be a string');
+            return;
+        }
+
+        // Ensure server URL is set (fallback to default)
+        if (!this._serverUrl) {
+            this._serverUrl = `http://127.0.0.1:${this._serverPort}`;
+            log(`Server URL was null, setting fallback: ${this._serverUrl}`);
+        }
+
+        // Ensure HTTP session is valid
+        if (!this._httpSession) {
+            log('HTTP session is null, creating new session');
+            this._httpSession = new Soup.Session();
+        }
+
         try {
             // Determine which namespace to use based on memory type
             const namespace = memory.context?.metadata?.type === 'llm_memory' 
                 ? 'llm_memories' 
                 : 'conversation_history';
+
+            log(`Indexing memory to namespace '${namespace}': ${memory.text.substring(0, 50)}...`);
 
             // Format memory for indexing
             const memoryDoc = {
@@ -1127,12 +1180,46 @@ Remember: Your response must be ONLY the JSON object, nothing else.`;
                         type: memory.context?.metadata?.type || 'conversation',
                         importance: memory.context?.metadata?.importance || 'normal',
                         tags: memory.context?.metadata?.tags || []
-                    }
+                    },
+                    // Add all other context properties that might be present
+                    ...memory.context
                 }
             };
 
+            // Debug the URL being used
+            const targetUrl = `${this._serverUrl}/index`;
+            log(`Creating Soup message for URL: ${targetUrl}`);
+            log(`HTTP session valid: ${!!this._httpSession}`);
+
             // Index memory in the appropriate namespace
-            const message = Soup.Message.new('POST', `${this._serverUrl}/index`);
+            const message = Soup.Message.new('POST', targetUrl);
+            if (!message) {
+                log(`Error in indexMemory: failed to create Soup message for URL: ${targetUrl}`);
+                log(`Server URL: ${this._serverUrl}, Server Port: ${this._serverPort}`);
+                log(`URL length: ${targetUrl.length}, URL valid: ${targetUrl.startsWith('http')}`);
+                
+                // Try with a simpler URL format
+                const simpleUrl = 'http://127.0.0.1:5000/index';
+                log(`Attempting with simple URL: ${simpleUrl}`);
+                const simpleMessage = Soup.Message.new('POST', simpleUrl);
+                if (!simpleMessage) {
+                    log('Failed to create Soup message even with simple URL - possible Soup library issue');
+                    return;
+                } else {
+                    log('Simple URL worked, using that instead');
+                    return this._indexWithMessage(simpleMessage, namespace, memoryDoc);
+                }
+            }
+            
+            return this._indexWithMessage(message, namespace, memoryDoc);
+            
+        } catch (e) {
+            log(`Error in indexMemory: ${e.message}`);
+            throw e;
+        }
+    }
+
+    _indexWithMessage(message, namespace, memoryDoc) {
             message.request_headers.append('Content-Type', 'application/json');
             
             const payload = JSON.stringify({
@@ -1144,40 +1231,50 @@ Remember: Your response must be ONLY the JSON object, nothing else.`;
             
             return new Promise((resolve, reject) => {
                 this._httpSession.queue_message(message, (session, msg) => {
+                if (!msg) {
+                    const error = new Error('HTTP response message is null');
+                    log(`Error in indexMemory: ${error.message}`);
+                    reject(error);
+                    return;
+                }
+                
                     if (msg.status_code === 200) {
                         try {
                             const response = JSON.parse(msg.response_body.data);
+                            if (response.status === 'success') {
                             log(`Successfully indexed memory in namespace '${namespace}'`);
                             resolve(response);
+                            } else {
+                                const errorMessage = response.error || 'Unknown error';
+                                log(`Failed to index memory: ${errorMessage}`);
+                                reject(new Error(errorMessage));
+                            }
                         } catch (e) {
                             log(`Error parsing memory indexing response: ${e.message}`);
                             reject(e);
                         }
                     } else {
-                        log(`Failed to index memory: ${msg.status_code}`);
-                        reject(new Error(`Failed to index memory: ${msg.status_code}`));
+                        try {
+                            const errorResponse = JSON.parse(msg.response_body.data);
+                            const errorMessage = errorResponse.error || `Failed to index memory: ${msg.status_code}`;
+                            log(errorMessage);
+                            reject(new Error(errorMessage));
+                        } catch (e) {
+                            const errorMessage = `Failed to index memory: ${msg.status_code}`;
+                            log(errorMessage);
+                            reject(new Error(errorMessage));
+                        }
                     }
                 });
             });
-        } catch (e) {
-            log(`Error in indexMemory: ${e.message}`);
-            throw e;
-        }
     }
 
     async clearNamespace(namespace) {
-        if (!this._modelLoaded) {
-            log('Server not running, cannot clear namespace');
+        if (!this._initialized) {
+            log('Memory service not initialized, cannot clear namespace');
             return;
         }
 
-        // Only clear the specified namespace, never clear llm_memories
-        if (namespace === 'llm_memories') {
-            log('Warning: Attempted to clear llm_memories namespace - operation blocked');
-            return Promise.resolve();
-        }
-
-        return new Promise((resolve, reject) => {
             try {
                 const message = Soup.Message.new('POST', `${this._serverUrl}/clear`);
                 message.request_headers.append('Content-Type', 'application/json');
@@ -1185,26 +1282,34 @@ Remember: Your response must be ONLY the JSON object, nothing else.`;
                 const payload = JSON.stringify({ namespace });
                 message.set_request_body_from_bytes('application/json', new GLib.Bytes(payload));
                 
+            return new Promise((resolve, reject) => {
                 this._httpSession.queue_message(message, (session, msg) => {
+                    if (!msg) {
+                        log('HTTP response message is null in clearNamespace');
+                        reject(new Error('No response from server'));
+                        return;
+                    }
+                    
                     if (msg.status_code === 200) {
                         try {
                             const response = JSON.parse(msg.response_body.data);
-                            log(`Successfully cleared namespace: ${namespace}`);
-                            resolve(response);
+                            if (response.status === 'success') {
+                                resolve();
+                            } else {
+                                reject(new Error(response.error || 'Failed to clear namespace'));
+                            }
                         } catch (e) {
-                            log(`Error parsing clear namespace response: ${e.message}`);
-                            reject(e);
+                            reject(new Error(`Error parsing response: ${e.message}`));
                         }
                     } else {
-                        log(`Clear namespace request failed with status: ${msg.status_code}`);
-                        reject(new Error(`Clear namespace request failed: ${msg.status_code}`));
+                        reject(new Error(`Server returned status ${msg.status_code}`));
                     }
+                });
                 });
             } catch (e) {
                 log(`Error in clearNamespace: ${e.message}`);
-                reject(e);
+            throw e;
             }
-        });
     }
 
     /**
@@ -1381,5 +1486,81 @@ Remember: Your response must be ONLY the JSON object, nothing else.`;
         }
         
         return Math.min(relevance, 1.0);  // Cap at 1.0
+    }
+
+    async _runAsyncCommand(args) {
+        return new Promise((resolve, reject) => {
+            try {
+                const proc = Gio.Subprocess.new(
+                    args,
+                    Gio.SubprocessFlags.STDOUT_PIPE | Gio.SubprocessFlags.STDERR_PIPE
+                );
+
+                proc.communicate_utf8_async(null, null, (proc, res) => {
+                    try {
+                        const [, stdout, stderr] = proc.communicate_utf8_finish(res);
+                        const status = proc.get_exit_status();
+
+                        if (status === 0) {
+                            if (stdout) {
+                                log(`Command output: ${stdout.trim()}`);
+                            }
+                            resolve(stdout);
+                        } else {
+                            const error = stderr ? stderr.trim() : 'Unknown error';
+                            log(`Command error: ${error}`);
+                            reject(new Error(error));
+                        }
+                    } catch (e) {
+                        log(`Error in command execution: ${e.message}`);
+                        reject(e);
+                    }
+                });
+            } catch (e) {
+                log(`Error starting command: ${e.message}`);
+                reject(e);
+            }
+        });
+    }
+
+    async _runAsyncCommandWithTimeout(args, timeout) {
+        return new Promise((resolve, reject) => {
+            try {
+                const proc = Gio.Subprocess.new(
+                    args,
+                    Gio.SubprocessFlags.STDOUT_PIPE | Gio.SubprocessFlags.STDERR_PIPE
+                );
+
+                const timeoutId = GLib.timeout_add(GLib.PRIORITY_DEFAULT, timeout, () => {
+                    reject(new Error('Command timed out'));
+                    return GLib.SOURCE_REMOVE;
+                });
+
+                proc.communicate_utf8_async(null, null, (proc, res) => {
+                    GLib.source_remove(timeoutId);
+                    try {
+                        const [, stdout, stderr] = proc.communicate_utf8_finish(res);
+                        const status = proc.get_exit_status();
+
+                        if (status === 0) {
+                            if (stdout) {
+                                log(`Command output: ${stdout.trim()}`);
+                            }
+                            resolve(stdout);
+                        } else {
+                            const error = stderr ? stderr.trim() : 'Unknown error';
+                            log(`Command error: ${error}`);
+                            reject(new Error(error));
+                        }
+                    } catch (e) {
+                        log(`Error in command execution: ${e.message}`);
+                        reject(e);
+                    }
+                });
+            } catch (e) {
+                log(`Error starting command: ${e.message}`);
+                reject(e);
+            }
+        });
     }
 }); 
