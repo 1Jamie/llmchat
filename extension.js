@@ -1590,15 +1590,9 @@ class LLMChatBox {
         // Store the user's query for memory processing
         this._lastUserQuery = text;
         
-        // Add user message to UI
+        // Add user message to UI and history
         this._addMessage(text, 'user');
 
-        // Add to messages array
-        this._messages.push({
-            role: 'user',
-            content: text
-        });
-        
         // Show thinking indicator
         this._addMessage('Thinking...', 'system', true);
         
@@ -3042,8 +3036,25 @@ Please provide your final answer now using ONLY the information gathered above.`
     async _saveCurrentSession() {
         if (this._messages.length === 0) return;
 
+        // Generate a title if one doesn't exist
+        let sessionTitle = this._sessionTitle;
+        if (!sessionTitle && this._messages.length > 0) {
+            // Find the first user message to use as title
+            const firstUserMessage = this._messages.find(msg => msg.sender === 'user' && msg.text);
+            if (firstUserMessage) {
+                // Use first 50 characters of the first user message as title
+                sessionTitle = firstUserMessage.text.length > 50 
+                    ? firstUserMessage.text.substring(0, 47) + '...'
+                    : firstUserMessage.text;
+                // Set the title for future saves in this session
+                this._sessionTitle = sessionTitle;
+            } else {
+                sessionTitle = 'Untitled Chat';
+            }
+        }
+
         const metadata = {
-            title: this._sessionTitle,
+            title: sessionTitle,
             created_at: new Date().toISOString(),
             settings: {
                 provider: this._settings.get_string('service-provider'),
@@ -3054,7 +3065,7 @@ Please provide your final answer now using ONLY the information gathered above.`
 
         try {
             await this._sessionManager.saveSession(this._sessionId, this._messages, metadata);
-            log(`Session saved successfully: ${this._sessionId}`);
+            log(`Session saved successfully: ${this._sessionId} - "${sessionTitle}"`);
         } catch (error) {
             log(`Error saving session: ${error.message}`);
         }
