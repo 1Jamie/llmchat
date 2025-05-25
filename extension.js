@@ -45,6 +45,189 @@ toolLoader.setMemoryService(memoryService);
 // Initialize session manager after memory service
 const sessionManager = new SessionManager();
 
+// LLM Search Provider for GNOME Activities
+var LLMSearchProvider = class LLMSearchProvider {
+    constructor(extension) {
+        this._extension = extension;
+        this._settings = extension._settings;
+        this.id = 'llm-chat-search-provider';
+        this.isRemoteProvider = false;
+        this.canLaunchSearch = true;
+        
+        // Create a proper app info object that implements all required methods
+        this.appInfo = {
+            get_name: () => 'LLM Chat',
+            get_id: () => 'llm-chat-search-provider',
+            get_description: () => 'LLM Chat Assistant',
+            get_executable: () => 'true', // Use 'true' command as dummy
+            get_commandline: () => 'true',
+            get_display_name: () => 'LLM Chat',
+            get_icon: () => null,
+            get_filename: () => null,
+            should_show: () => true, // This was the missing method causing the error
+            supports_uris: () => false,
+            supports_files: () => false,
+            launch: () => true,
+            launch_uris: () => true,
+            launch_default_for_uri: () => true,
+            equal: (other) => other && other.get_id && other.get_id() === this.get_id(),
+            // Additional methods that might be expected
+            can_delete: () => false,
+            delete: () => false,
+            dup: () => this,
+            ref: function() { return this; },
+            unref: function() { },
+            // Implement the interface that GNOME Shell expects
+            [Symbol.iterator]: function*() {
+                // Empty iterator for interface compatibility
+            }
+        };
+        
+        log('[Search Provider] LLM Search Provider created');
+    }
+
+    getInitialSearchResults(terms, callback) {
+        log(`[Search Provider] getInitialSearchResults called with terms: ${JSON.stringify(terms)}`);
+        
+        if (!terms || terms.length === 0) {
+            log('[Search Provider] No terms provided, returning empty results');
+            callback([]);
+            return;
+        }
+        
+        // Join terms into a query
+        const query = terms.join(' ');
+        log(`[Search Provider] Joined query: "${query}"`);
+        
+        // Show LLM option for any query with at least 2 characters
+        if (query.length < 2) {
+            log('[Search Provider] Query too short, returning empty results');
+            callback([]);
+            return;
+        }
+
+        // Return a simple result ID
+        const resultId = 'llm-query';
+        log(`[Search Provider] Returning result ID: ${resultId}`);
+        callback([resultId]);
+    }
+
+    // GNOME Shell 42 uses these method names instead
+    getInitialResultSet(terms, callback) {
+        log(`[Search Provider] getInitialResultSet called with terms: ${JSON.stringify(terms)}`);
+        this.getInitialSearchResults(terms, callback);
+    }
+
+    getSubsearchResults(previousResults, terms, callback) {
+        log(`[Search Provider] getSubsearchResults called with terms: ${JSON.stringify(terms)}`);
+        this.getInitialSearchResults(terms, callback);
+    }
+
+    getSubsearchResultSet(previousResults, terms, callback) {
+        log(`[Search Provider] getSubsearchResultSet called with terms: ${JSON.stringify(terms)}`);
+        this.getInitialSearchResults(terms, callback);
+    }
+
+    getResultMetas(resultIds, callback) {
+        log(`[Search Provider] getResultMetas called with IDs: ${JSON.stringify(resultIds)}`);
+        
+        const metas = resultIds.map(id => {
+            return {
+                id: id,
+                name: 'Ask LLM Chat',
+                description: 'Send your search query to the LLM assistant',
+                createIcon: (size) => {
+                    log(`[Search Provider] Creating icon with size: ${size}`);
+                    return new St.Icon({
+                        icon_name: 'system-run-symbolic',
+                        icon_size: size || 32
+                    });
+                }
+            };
+        });
+        
+        log(`[Search Provider] Returning ${metas.length} result metas`);
+        callback(metas);
+    }
+
+    activateResult(resultId, terms, timestamp) {
+        log(`[Search Provider] activateResult called with ID: ${resultId}, terms: ${JSON.stringify(terms)}`);
+        
+        const query = terms.join(' ');
+        log(`[Search Provider] Activating with query: "${query}"`);
+        
+        try {
+            // Open the LLM chat panel and send the query
+            if (this._extension._button && this._extension._button._chatBox) {
+                log('[Search Provider] Found chat box, opening menu');
+                
+                // Close overview first if it's open
+                if (Main.overview.visible) {
+                    log('[Search Provider] Closing overview');
+                    Main.overview.hide();
+                }
+                
+                // Open the menu
+                this._extension._button.menu.open();
+                log('[Search Provider] Menu opened');
+                
+                // Set the query in the text entry and send it after a delay
+                GLib.timeout_add(GLib.PRIORITY_DEFAULT, 200, () => {
+                    try {
+                        const chatBox = this._extension._button._chatBox;
+                        if (chatBox && chatBox._entryText) {
+                            log(`[Search Provider] Setting query text: "${query}"`);
+                            chatBox._entryText.set_text(query);
+                            chatBox._entryText.grab_key_focus();
+                            
+                            // Auto-send the message if the memory service is ready
+                            GLib.timeout_add(GLib.PRIORITY_DEFAULT, 500, () => {
+                                try {
+                                    if (chatBox && !chatBox._isMemoryServiceLoading) {
+                                        log('[Search Provider] Auto-sending message');
+                                        chatBox._sendMessage(query);
+                                        chatBox._entryText.set_text('');
+                                    } else {
+                                        log('[Search Provider] Memory service still loading, not auto-sending');
+                                    }
+                                } catch (e) {
+                                    log(`[Search Provider] Error auto-sending LLM query: ${e.message}`);
+                                }
+                                return GLib.SOURCE_REMOVE;
+                            });
+                        } else {
+                            log('[Search Provider] Chat box or entry text not found');
+                        }
+                    } catch (e) {
+                        log(`[Search Provider] Error setting LLM query: ${e.message}`);
+                    }
+                    return GLib.SOURCE_REMOVE;
+                });
+            } else {
+                log('[Search Provider] Extension button or chat box not found');
+            }
+        } catch (e) {
+            log(`[Search Provider] Error activating LLM search result: ${e.message}`);
+        }
+    }
+
+    launchSearch(terms, timestamp) {
+        log(`[Search Provider] launchSearch called with terms: ${JSON.stringify(terms)}`);
+        this.activateResult('llm-query', terms, timestamp);
+    }
+
+    createResultObject(resultMeta, terms) {
+        log(`[Search Provider] createResultObject called for: ${resultMeta.id}`);
+        // Return null to use default result object rendering
+        return null;
+    }
+
+    filterResults(results, maxNumber) {
+        log(`[Search Provider] filterResults called with ${results.length} results, max: ${maxNumber}`);
+        return results.slice(0, maxNumber);
+    }
+};
+
 // Provider Adapter class to handle different AI providers
 class ProviderAdapter {
     constructor(settings, chatBox = null) {
@@ -3365,6 +3548,10 @@ class Extension {
     constructor() {
         this._button = null;
         this._settings = null;
+        this._searchProvider = null;
+        this._searchController = null;
+        this._searchRegistrationMethod = null;
+        this._logLevelChangedId = null;
     }
 
     enable() {
@@ -3381,6 +3568,93 @@ class Extension {
         info('Extension enabled');
         this._button = new LLMChatButton(this._settings);
         Main.panel.addToStatusArea('llm-chat', this._button);
+        
+        // Initialize and register the search provider
+        this._searchProvider = new LLMSearchProvider(this);
+        
+        // For GNOME Shell 42, find the correct search provider registration method
+        let searchController = null;
+        let registrationMethod = null;
+        let registrationPath = '';
+        
+        // Try different paths to find the search controller
+        if (Main.overview._overview && Main.overview._overview._controls && Main.overview._overview._controls._searchController) {
+            searchController = Main.overview._overview._controls._searchController;
+            registrationPath = 'Main.overview._overview._controls._searchController';
+        } else if (Main.overview.searchController) {
+            searchController = Main.overview.searchController;
+            registrationPath = 'Main.overview.searchController';
+        } else if (Main.overview._searchController) {
+            searchController = Main.overview._searchController;
+            registrationPath = 'Main.overview._searchController';
+        } else if (Main.overview.viewSelector && Main.overview.viewSelector._searchResults) {
+            searchController = Main.overview.viewSelector._searchResults;
+            registrationPath = 'Main.overview.viewSelector._searchResults';
+        }
+        
+        if (searchController) {
+            info(`[Search Provider] Found search controller at: ${registrationPath}`);
+            
+            // Try different registration methods
+            if (typeof searchController.addProvider === 'function') {
+                searchController.addProvider(this._searchProvider);
+                registrationMethod = 'addProvider';
+            } else if (typeof searchController._addProvider === 'function') {
+                searchController._addProvider(this._searchProvider);
+                registrationMethod = '_addProvider';
+            } else if (searchController._searchResults && typeof searchController._searchResults.addProvider === 'function') {
+                searchController._searchResults.addProvider(this._searchProvider);
+                registrationMethod = '_searchResults.addProvider';
+            } else if (searchController._searchResults && typeof searchController._searchResults._registerProvider === 'function') {
+                searchController._searchResults._registerProvider(this._searchProvider);
+                registrationMethod = '_searchResults._registerProvider';
+            } else if (typeof searchController.registerProvider === 'function') {
+                searchController.registerProvider(this._searchProvider);
+                registrationMethod = 'registerProvider';
+            } else if (typeof searchController._registerProvider === 'function') {
+                searchController._registerProvider(this._searchProvider);
+                registrationMethod = '_registerProvider';
+            }
+            
+            if (registrationMethod) {
+                info(`[Search Provider] LLM Search Provider registered successfully using ${registrationMethod} on ${registrationPath}`);
+                this._searchRegistrationMethod = registrationMethod;
+                this._searchController = searchController;
+                
+                // Test if the provider is working by calling a method
+                try {
+                    this._searchProvider.getInitialSearchResults(['test'], (results) => {
+                        info(`[Search Provider] Test call successful, got ${results.length} results`);
+                    });
+                } catch (e) {
+                    warn(`[Search Provider] Test call failed: ${e.message}`);
+                }
+            } else {
+                // Log available methods for debugging
+                const methods = Object.getOwnPropertyNames(searchController)
+                    .concat(Object.getOwnPropertyNames(Object.getPrototypeOf(searchController)))
+                    .filter(name => typeof searchController[name] === 'function')
+                    .filter((name, index, self) => self.indexOf(name) === index)
+                    .sort();
+                warn(`[Search Provider] Could not find registration method. Available methods: ${methods.join(', ')}`);
+                
+                // Also check nested objects
+                if (searchController._searchResults) {
+                    const nestedMethods = Object.getOwnPropertyNames(searchController._searchResults)
+                        .concat(Object.getOwnPropertyNames(Object.getPrototypeOf(searchController._searchResults)))
+                        .filter(name => typeof searchController._searchResults[name] === 'function')
+                        .filter((name, index, self) => self.indexOf(name) === index)
+                        .sort();
+                    warn(`[Search Provider] _searchResults methods: ${nestedMethods.join(', ')}`);
+                }
+            }
+        } else {
+            warn('[Search Provider] Could not find search controller - search provider not registered');
+            
+            // Debug: Log what's available on Main.overview
+            const overviewProps = Object.getOwnPropertyNames(Main.overview);
+            warn(`[Search Provider] Available Main.overview properties: ${overviewProps.join(', ')}`);
+        }
         
         // Clear any existing session when the extension is enabled
         if (this._button._chatBox) {
@@ -3414,6 +3688,55 @@ class Extension {
     }
 
     disable() {
+        // Unregister the search provider first
+        if (this._searchProvider && this._searchController && this._searchRegistrationMethod) {
+            try {
+                // Use the stored registration method to determine unregistration method
+                if (this._searchRegistrationMethod === 'addProvider' && typeof this._searchController.removeProvider === 'function') {
+                    this._searchController.removeProvider(this._searchProvider);
+                    info('[Search Provider] LLM Search Provider unregistered with removeProvider');
+                } else if (this._searchRegistrationMethod === '_addProvider' && typeof this._searchController._removeProvider === 'function') {
+                    this._searchController._removeProvider(this._searchProvider);
+                    info('[Search Provider] LLM Search Provider unregistered with _removeProvider');
+                } else if (this._searchRegistrationMethod === '_searchResults.addProvider' && this._searchController._searchResults && typeof this._searchController._searchResults.removeProvider === 'function') {
+                    this._searchController._searchResults.removeProvider(this._searchProvider);
+                    info('[Search Provider] LLM Search Provider unregistered via _searchResults.removeProvider');
+                } else if (this._searchRegistrationMethod === '_searchResults._registerProvider' && this._searchController._searchResults && typeof this._searchController._searchResults._unregisterProvider === 'function') {
+                    this._searchController._searchResults._unregisterProvider(this._searchProvider);
+                    info('[Search Provider] LLM Search Provider unregistered via _searchResults._unregisterProvider');
+                } else if (this._searchRegistrationMethod === 'registerProvider' && typeof this._searchController.unregisterProvider === 'function') {
+                    this._searchController.unregisterProvider(this._searchProvider);
+                    info('[Search Provider] LLM Search Provider unregistered with unregisterProvider');
+                } else if (this._searchRegistrationMethod === '_registerProvider' && typeof this._searchController._unregisterProvider === 'function') {
+                    this._searchController._unregisterProvider(this._searchProvider);
+                    info('[Search Provider] LLM Search Provider unregistered with _unregisterProvider');
+                } else {
+                    warn(`[Search Provider] Could not find unregistration method for ${this._searchRegistrationMethod}`);
+                }
+            } catch (e) {
+                warn(`[Search Provider] Error during unregistration: ${e.message}`);
+            }
+            
+            this._searchProvider = null;
+            this._searchController = null;
+            this._searchRegistrationMethod = null;
+        }
+        
+        // Disconnect settings signals
+        if (this._logLevelChangedId) {
+            this._settings.disconnect(this._logLevelChangedId);
+            this._logLevelChangedId = null;
+        }
+        
+        // Clean up the button and chat box
+        if (this._button) {
+            if (this._button._chatBox) {
+                this._button._chatBox.destroy();
+            }
+            this._button.destroy();
+            this._button = null;
+        }
+        
         // Clean up memory service
         if (memoryService) {
             try {
@@ -3428,128 +3751,7 @@ class Extension {
             }
         }
         
-        if (this._button) {
-            // Clear the session before disabling
-            if (this._button._chatBox) {
-                this._button._chatBox.clearSession();
-            }
-            
-            // First disconnect all signal handlers
-            if (this._button._chatBox) {
-                // Disconnect signal handlers from the chat box
-                if (this._button._chatBox._entryText) {
-                    // Disconnect specific signal handlers
-                    if (this._button._chatBox._entryText.clutter_text) {
-                        const text = this._button._chatBox._entryText.clutter_text;
-                        // Disconnect key-press-event handler
-                        if (text._keyPressHandlerId) {
-                            text.disconnect(text._keyPressHandlerId);
-                        }
-                        // Disconnect activate handler
-                        if (text._activateHandlerId) {
-                            text.disconnect(text._activateHandlerId);
-                        }
-                        // Disconnect multi-line handler
-                        if (text._multiLineHandlerId) {
-                            text.disconnect(text._multiLineHandlerId);
-                        }
-                    }
-                    
-                    if (this._button._chatBox._clickAction) {
-                        this._button._chatBox._clickAction.disconnect_all();
-                        this._button._chatBox._clickAction.destroy();
-                    }
-                }
-
-                if (this._button._chatBox._toolCallingToggleButton) {
-                    if (this._button._chatBox._toolCallingToggleButton._clickHandlerId) {
-                        this._button._chatBox._toolCallingToggleButton.disconnect(this._button._chatBox._toolCallingToggleButton._clickHandlerId);
-                    }
-                }
-
-                // Remove all children from containers
-                if (this._button._chatBox._messageContainer) {
-                    this._button._chatBox._messageContainer.destroy_all_children();
-                }
-
-                if (this._button._chatBox._scrollView) {
-                    this._button._chatBox._scrollView.destroy_all_children();
-                }
-
-                // Clear arrays and objects
-                this._button._chatBox._messages = [];
-                this._button._chatBox._availableTools = [];
-
-                // Destroy the chat box actor
-                if (this._button._chatBox.actor) {
-                    this._button._chatBox.actor.destroy_all_children();
-                    this._button._chatBox.actor.destroy();
-                }
-            }
-
-            // Handle menu signals properly - store signal IDs in _init and disconnect them here
-            if (this._button.menu) {
-                // In GNOME Shell, menu typically has _openStateId for the open-state-changed signal
-                // This approach disconnects signals without relying on disconnect_all
-                const signals = this._button.menu._signals || [];
-                if (Array.isArray(signals)) {
-                    signals.forEach(signalId => {
-                        if (signalId) {
-                            try {
-                                this._button.menu.disconnect(signalId);
-                            } catch (e) {
-                                log(`Error disconnecting signal: ${e.message}`);
-                            }
-                        }
-                    });
-                }
-                // Also try to disconnect the menu's open-state-changed signal if we have its ID
-                if (this._button.menu._openStateId) {
-                    try {
-                        this._button.menu.disconnect(this._button.menu._openStateId);
-                    } catch (e) {
-                        log(`Error disconnecting open-state-changed: ${e.message}`);
-                    }
-                }
-                
-                // Clean up menu children properly
-                try {
-                    // The menu's box contains the actual children
-                    if (this._button.menu.box) {
-                        // Get children and destroy each one
-                        const children = this._button.menu.box.get_children() || [];
-                        children.forEach(child => {
-                            if (child) {
-                                this._button.menu.box.remove_child(child);
-                                child.destroy();
-                            }
-                        });
-                    }
-                } catch (e) {
-                    log(`Error cleaning up menu children: ${e.message}`);
-                }
-            }
-
-            // Remove from panel and destroy the button
-            try {
-                if (Main.panel.statusArea['llm-chat']) {
-                    Main.panel.statusArea['llm-chat'].destroy();
-                }
-            } catch (e) {
-                log(`Error removing from panel: ${e.message}`);
-            }
-            
-            this._button.destroy();
-            this._button = null;
-        }
-
-        if (this._settings) {
-            if (this._logLevelChangedId) {
-                this._settings.disconnect(this._logLevelChangedId);
-                this._logLevelChangedId = null;
-            }
-            this._settings = null;
-        }
+        info('Extension disabled');
     }
 }
 
