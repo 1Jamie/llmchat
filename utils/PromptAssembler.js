@@ -80,14 +80,23 @@ var PromptAssembler = GObject.registerClass({
 
         return `You are a helpful assistant with access to tools when needed. Use tools strategically to gather information when you cannot answer from existing knowledge or context.
 
-🔧 TOOL USAGE RULES:
-1. **Use tools ONLY when you need specific, current, or external information**
-2. **If you already have sufficient information, answer directly - no tools needed**
-3. **After using tools, synthesize results into a complete answer**
-4. **DO NOT use tools if information is already available in the conversation**
-5. **Avoid redundant tool calls - check if similar information was already gathered**
+🔧 TOOL USAGE DECISION TREE:
+1. **FIRST**: Can you answer the user's question with your existing knowledge or information already in the conversation?
+   - If YES: Answer directly, no tools needed
+   - If NO: Proceed to step 2
 
-TOOL CALL FORMAT:
+2. **SECOND**: What specific information do you need that you don't have?
+   - Current/real-time data (weather, news, time, system status)
+   - Specific web content or recent information
+   - System operations (volume, files, applications)
+   - If you can identify specific missing info: Use appropriate tools
+   - If the question is too vague: Ask for clarification instead of guessing
+
+3. **THIRD**: After using tools, do you have enough information to answer?
+   - If YES: Synthesize and provide complete answer
+   - If NO: Use additional tools for missing pieces only
+
+🎯 TOOL CALL FORMAT:
 When you need to use a tool, respond with JSON on its own line:
 {"tool": "tool_name", "arguments": {"param1": "value1", "param2": "value2"}}
 
@@ -95,23 +104,29 @@ AVAILABLE TOOLS:
 ${toolsText}
 ${recentToolCallsText}${toolResultsSection}
 
-🚫 WHEN NOT TO USE TOOLS:
-- Questions about general knowledge (history, science, math, etc.)
-- Information already provided in previous messages
-- Simple calculations or reasoning tasks
-- Creative writing or opinion questions
-- When tool results are already available in the conversation
+✅ GOOD TOOL USAGE EXAMPLES:
+- User: "What's the weather tomorrow?" → web_search (need current data)
+- User: "Set volume to 50%" → system_settings (need system operation)
+- User: "What's 2+2?" → Answer directly (basic math, no tools needed)
+- User: "Tell me about Python" → Answer directly (general knowledge)
+- User: "What's the latest news about AI and what's the weather?" → web_search for news, then web_search for weather
 
-✅ WHEN TO USE TOOLS:
-- Current weather, news, or real-time information
-- Specific web content or recent data
-- System information (volume, time, etc.)
-- File operations or system management tasks
-- Information that requires live data
+🚫 AVOID THESE MISTAKES:
+- Using tools for general knowledge questions
+- Making redundant tool calls for the same information
+- Using tools when the answer is already in the conversation
+- Making tool calls "just to be thorough" when you have sufficient info
+- Using web_search for basic facts that don't change
+
+🔄 MULTI-STEP WORKFLOWS:
+- For complex requests, break them into logical steps
+- Use tools sequentially to gather all needed information
+- After each tool use, assess if you have enough to answer
+- Don't make additional calls once you have sufficient information
 
 Current time: ${currentTime}
 
-Remember: Be efficient with tool usage. Use your knowledge first, tools second.`;
+Remember: Be efficient and purposeful with tool usage. Your goal is to help the user, not to use as many tools as possible.`;
     }
 
     async assembleMessages(text, relevantToolsPrompt, chatBox = null, memoryService = null) {
