@@ -277,32 +277,34 @@ class ProviderAdapter {
 
         // Determine if this memory is important enough to store
         const importance = this._determineMemoryImportance(query, response);
-        if (importance.importance === 'none') {
+        if (importance < 0.5) {
             log('Memory not important enough to store');
-            return;
-        }
+                                return;
+                            }
 
-        // Create a clean memory object without tool history or session details
+        // Get the current session context
+        const sessionContext = {
+            session_id: this._sessionId,
+            exchange_index: this._chatBox ? Math.floor(this._chatBox._messages.length / 2) : 0, // Each exchange is 2 messages (user + AI)
+            conversation_history: this._chatBox ? this._chatBox._getConversationHistory() : [],
+            tool_history: this._recentToolCalls,
+                provider: provider,
+            timestamp: new Date().toISOString(),
+            chat_id: chatId,
+            importance: importance
+        };
+
+        // Create memory object with complete context
         const memory = {
             text: `User: ${query}\n\nAssistant: ${response}`,
-            context: {
-                timestamp: new Date().toISOString(),
-                provider: provider,
-                importance: importance.importance,
-                // Only include expiration if it's volatile
-                ...(importance.expiration_hours && {
-                    is_volatile: true,
-                    expires_at: new Date(Date.now() + importance.expiration_hours * 60 * 60 * 1000).toISOString(),
-                    expiration_hours: importance.expiration_hours
-                })
-            }
-        };
+            context: sessionContext
+                                    };
                                     
         try {
             // Store memory and let the server's dual-pass system categorize it
             await this._memoryService.indexMemory(memory);
-            log(`Memory stored: ${importance.importance} importance${importance.expiration_hours ? `, expires in ${importance.expiration_hours}h` : ', permanent'}`);
-        } catch (error) {
+            log('Memory processed with dual-pass extraction system');
+                    } catch (error) {
             log(`Error processing memory: ${error.message}`);
         }
     }
@@ -458,150 +460,169 @@ class ProviderAdapter {
     _determineMemoryImportance(query, response) {
         const text = `${query} ${response}`.toLowerCase();
         
-        // Patterns for information that should NEVER be stored (tool calls, temporary actions, etc.)
-        const excludePatterns = [
-            // Tool calls and browser actions - these should never be stored
-            /(?:open|opened|opening|launch|launched|launching)\s+(?:chrome|firefox|browser|youtube|website|url)/i,
-            /(?:tool|function|command)\s+(?:call|executed|run|running|completed)/i,
-            /(?:browser|window|tab)\s+(?:opened|closed|switched|focused)/i,
-            /(?:application|app)\s+(?:started|launched|opened|closed)/i,
-            /(?:workspace|desktop)\s+(?:switched|changed|moved)/i,
+        // Patterns for information that should be stored as short-term volatile (hours)
+        const shortTermVolatilePatterns = [
+            // System state that changes frequently but might be useful short-term
+            /(?:current time|current date|system load|memory usage|cpu usage|disk space)/i,
+            /(?:process list|running processes|active processes)/i,
+            /(?:network status|connection status|connectivity|network state)/i,
+            /(?:active connection|current connection|network connection)/i,
             
-            // System operations and temporary states
-            /(?:system|process|service)\s+(?:started|stopped|restarted|killed)/i,
-            /(?:file|folder|directory)\s+(?:created|deleted|moved|copied)/i,
-            /(?:volume|brightness|setting)\s+(?:changed|adjusted|set)/i,
-            /(?:notification|alert|popup)\s+(?:shown|displayed|dismissed)/i,
+            // Current activities and temporary states
+            /(?:currently working on|currently debugging|right now|at the moment)/i,
+            /(?:temporary|temp|cache|cached|dynamic content)/i,
+            /(?:this session|this conversation|current task)/i,
+            /(?:weather today|current weather|today's weather|weather forecast)/i,
+            /(?:debugging|troubleshooting|investigating)/i,
             
-            // Search results and web content (too volatile)
-            /(?:search|found|fetched|retrieved)\s+(?:results|content|information|data)/i,
-            /(?:web|internet|online)\s+(?:search|query|lookup|content)/i,
-            /(?:weather|forecast|temperature)\s+(?:today|tomorrow|current|now)/i,
-            /(?:news|article|headline)\s+(?:today|recent|latest|current)/i,
+            // Daily context
+            /(?:today|this morning|this afternoon|this evening)/i,
+            /(?:daily|daily task|daily routine)/i,
             
-            // Tool execution confirmations
-            /(?:successfully|completed|finished)\s+(?:executed|running|performed)/i,
-            /(?:tool|function|command)\s+(?:result|output|response)/i,
-            /(?:already|previously)\s+(?:ran|executed|performed|opened)/i,
-            
-            // Temporary session information
-            /(?:current|this)\s+(?:session|conversation|chat|task)/i,
-            /(?:right now|at the moment|currently|presently)/i,
-            /(?:temporary|temp|cache|cached)/i,
-            
-            // System status and monitoring
-            /(?:cpu|memory|disk|network)\s+(?:usage|status|load|activity)/i,
-            /(?:process|service|daemon)\s+(?:list|status|running|active)/i,
-            /(?:window|application)\s+(?:list|status|active|running)/i,
-            
-            // Error messages and debugging
-            /(?:error|warning|debug|log)\s+(?:message|output|information)/i,
-            /(?:failed|error|exception|crash)/i,
-            
-            // Very short or generic responses
-            /^(?:ok|yes|no|done|sure|thanks|welcome)\.?$/i,
-            /^(?:i see|got it|understood|alright)\.?$/i
+            // Search and query results that might be useful short-term
+            /(?:search results|query results|web search|found information)/i,
+            /(?:fetched content|retrieved data|web content)/i
         ];
 
-        // Check for content that should be excluded
-        for (const pattern of excludePatterns) {
+        // Patterns for information that should be stored as medium-term volatile (days/weeks)
+        const mediumTermVolatilePatterns = [
+            /(?:this week|this project|current project|working on project)/i,
+            /(?:weekly|weekly goal|this sprint|current sprint)/i,
+            /(?:learning|studying|course|class)/i,
+            /(?:job search|interview|application)/i,
+            /(?:recent events|recent news|current events)/i,
+            /(?:temporary settings|project settings|session settings)/i
+        ];
+
+        // Patterns for information that should be avoided completely (truly noise)
+        const noisePatterns = [
+            // System command outputs and logs that are just noise
+            /(?:command output|terminal output|console output|shell output)(?:\s+|:).*error/i,
+            /(?:error log|system log|application log|debug log)(?:\s+|:).*(?:failed|error)/i,
+            
+            // File system operations that are just structural
+            /(?:file operation|directory operation|file system|file listing|directory listing)(?:\s+|:).*(?:create|delete|move)/i,
+            /(?:window layout|workspace layout|screen layout|display configuration)(?:\s+|:).*changed/i,
+            
+            // Session management noise
+            /(?:session|user session|login session)(?:\s+|:).*(?:started|ended|expired)/i
+        ];
+
+        // Check for truly noisy content that shouldn't be stored
+        for (const pattern of noisePatterns) {
             if (pattern.test(text)) {
-                log(`Excluding from memory (tool/action): ${text.substring(0, 100)}...`);
+                log(`Detected noisy content, not storing: ${pattern}`);
                 return { importance: 'none', expiration_hours: null };
             }
         }
 
-        // Patterns for truly important personal information that should be stored permanently
-        const personalPatterns = [
-            // Personal identity and location
-            /(?:my name is|i am|i'm called|call me)\s+\w+/i,
-            /(?:i live in|i'm from|i'm located in|my location is)\s+[\w\s,]+/i,
-            /(?:my email|my address|my phone|my contact)/i,
+        // Patterns for persistent information that should be stored permanently
+        const persistentPatterns = [
+            // Personal preferences and settings - permanent
+            /(?:prefer|preference|like|favorite|usually|typically|always|never)/i,
+            /(?:setting|configuration|option|choice|decision)/i,
             
-            // Strong personal preferences (not temporary)
-            /(?:i always|i never|i prefer|i like|i love|i hate|i dislike)\s+(?!today|now|currently)/i,
-            /(?:my favorite|my preferred|i usually|i typically)/i,
+            // Personal identity and location - permanent
+            /(?:name|email|address|location|city|country|timezone|state|zip|postal code)/i,
+            /(?:live in|reside in|located in|based in|living in|from|hometown)/i,
             
-            // Important personal decisions and goals
-            /(?:i decided|i chose|i'm planning|my goal|my plan)/i,
-            /(?:important to me|matters to me|i care about)/i,
+            // Important decisions and relationships - permanent
+            /(?:decided to|chose to|selected|picked|opted for)/i,
+            /(?:friend|colleague|partner|family|relative)/i,
             
-            // Skills and expertise
-            /(?:i know|i'm good at|i'm experienced|my skill|my expertise)/i,
-            /(?:i work as|my job|my profession|my career)/i,
+            // Significant dates and events - permanent
+            /(?:birthday|anniversary|important date|significant date)/i,
+            /(?:event|occasion|celebration|milestone)/i,
             
-            // Significant relationships and context
-            /(?:my family|my friend|my colleague|my partner)/i,
-            /(?:my project|my work|my study|my research)/i
+            // Skills and expertise - permanent
+            /(?:skill|expertise|experience|background|profession|job title)/i,
+            /(?:programming language|technology|framework|tool preference)/i,
+            
+            // Facts and knowledge - permanent
+            /(?:fact|information|knowledge|learned|discovered|found out)/i,
+            /(?:remember|note|important|significant|useful)/i
         ];
 
-        // Check for important personal information
-        let isPersonal = false;
-        for (const pattern of personalPatterns) {
+        // Check for short-term volatile content (6 hours for very dynamic info)
+        for (const pattern of shortTermVolatilePatterns) {
             if (pattern.test(text)) {
-                isPersonal = true;
-                log(`Storing personal information: ${text.substring(0, 100)}...`);
+                log(`Detected short-term volatile content, storing for 6 hours: ${pattern}`);
+                return { importance: 'normal', expiration_hours: 6 };
+            }
+        }
+
+        // Check for medium-term volatile content (3 days for contextual info)
+        for (const pattern of mediumTermVolatilePatterns) {
+            if (pattern.test(text)) {
+                log(`Detected medium-term volatile content, storing for 3 days: ${pattern}`);
+                return { importance: 'normal', expiration_hours: 72 }; // 3 days
+            }
+        }
+
+        // Check for persistent content
+        let isPersistent = false;
+        for (const pattern of persistentPatterns) {
+            if (pattern.test(text)) {
+                isPersistent = true;
                 break;
             }
         }
 
-        if (isPersonal) {
-            return { importance: 'high', expiration_hours: null }; // Permanent storage
+        if (isPersistent) {
+            // Calculate importance score for persistent content
+        let importanceScore = 0;
+        
+        // Factor 1: Personal Relevance (0-3 points)
+            importanceScore += 3;
+        
+        // Factor 2: Sentiment Strength (0-2 points)
+        const sentimentWords = {
+            positive: ['love', 'great', 'excellent', 'wonderful', 'amazing', 'perfect'],
+            negative: ['hate', 'terrible', 'awful', 'horrible', 'bad', 'poor']
+        };
+        
+        let sentimentCount = 0;
+        for (const word of [...sentimentWords.positive, ...sentimentWords.negative]) {
+            if (text.includes(word)) {
+                sentimentCount++;
+            }
         }
-
-        // Patterns for useful factual information (but not personal)
-        const factualPatterns = [
-            // Educational content and explanations
-            /(?:explanation|definition|meaning|concept|theory|principle)/i,
-            /(?:how to|tutorial|guide|instruction|method|technique)/i,
-            /(?:fact|information|knowledge|data|statistic)/i,
-            
-            // Important world knowledge (not time-sensitive)
-            /(?:history|historical|geography|geographical|scientific|mathematical)/i,
-            /(?:programming|coding|development|technology|software)/i,
-            /(?:language|grammar|vocabulary|translation)/i
-        ];
-
-        // Check for factual content worth storing
-        let isFactual = false;
-        for (const pattern of factualPatterns) {
-            if (pattern.test(text)) {
-                isFactual = true;
+        importanceScore += Math.min(sentimentCount, 2);
+        
+        // Factor 3: Context Importance (0-2 points)
+        const importantContexts = ['important', 'critical', 'essential', 'vital', 'crucial'];
+        for (const context of importantContexts) {
+            if (text.includes(context)) {
+                importanceScore += 2;
                 break;
-            }
-        }
-
-        if (isFactual && text.length > 100) { // Only store substantial factual content
-            log(`Storing factual information: ${text.substring(0, 100)}...`);
-            return { importance: 'normal', expiration_hours: null }; // Permanent storage
-        }
-
-        // For everything else, be very restrictive
-        // Only store if it's a substantial conversation (>200 chars) and doesn't match exclusion patterns
-        if (text.length > 200 && query.length > 20 && response.length > 50) {
-            // Additional check: make sure it's not just tool output or system information
-            const toolOutputPatterns = [
-                /(?:executed|completed|finished|done|success)/i,
-                /(?:result|output|response|status|information)/i,
-                /(?:found|retrieved|fetched|obtained|gathered)/i
-            ];
-            
-            let seemsLikeToolOutput = false;
-            for (const pattern of toolOutputPatterns) {
-                if (pattern.test(text) && text.length < 500) { // Short tool outputs
-                    seemsLikeToolOutput = true;
-                    break;
-                }
-            }
-            
-            if (!seemsLikeToolOutput) {
-                log(`Storing conversation as short-term memory: ${text.substring(0, 100)}...`);
-                return { importance: 'low', expiration_hours: 6 }; // Very short-term storage
             }
         }
         
-        // Default: don't store
-        log(`Not storing in memory: ${text.substring(0, 100)}...`);
+        // Factor 4: Temporal Relevance (0-2 points)
+        const temporalWords = ['always', 'never', 'forever', 'permanent', 'persistent'];
+        for (const word of temporalWords) {
+            if (text.includes(word)) {
+                importanceScore += 2;
+                break;
+            }
+        }
+        
+            // Determine final importance for persistent content (no expiration)
+        if (importanceScore >= 6) {
+                return { importance: 'high', expiration_hours: null };
+        } else if (importanceScore >= 3) {
+                return { importance: 'normal', expiration_hours: null };
+            }
+        }
+        
+        // Default: Store as medium-term volatile if it seems like conversation content
+        // This is much less restrictive - we'll store most conversation content
+        if (text.length > 20 && (query.length > 5 || response.length > 5)) {
+            log(`Storing conversation content as medium-term volatile (24 hours)`);
+            return { importance: 'normal', expiration_hours: 24 };
+        }
+        
+        // Only reject very short or empty content
         return { importance: 'none', expiration_hours: null };
     }
 
@@ -1855,58 +1876,81 @@ class LLMChatBox {
             }
             
             return {
-                name: call.function.name,
+            name: call.function.name,
                 args: args
             };
         });
         
-        // Improved redundancy detection - check for truly redundant calls
-        const isRepeatedCall = this._recentToolCalls.some(prevCalls => {
-            return currentCall.some(newCall => {
-                return prevCalls.some(prevCall => {
-                    // Same tool name
-                    if (prevCall.name !== newCall.name) return false;
-                    
-                    // For web_search, check if the query is substantially similar
-                    if (newCall.name === 'web_search') {
-                        const prevQuery = (prevCall.args.query || '').toLowerCase().trim();
-                        const newQuery = (newCall.args.query || '').toLowerCase().trim();
+        // Log parsed call details for debugging
+        currentCall.forEach((call, i) => {
+            log(`[Tools] Call ${i+1}: ${call.name} with args: ${JSON.stringify(call.args)}`);
+        });
+        
+        // Check for repeated or similar calls with enhanced detection
+        const isRepeatedCall = this._recentToolCalls.some((prevCall, idx) => {
+            // For web search, check for semantic similarity in queries
+            if (currentCall[0].name === 'web_search' && prevCall.some(p => p.name === 'web_search')) {
+                const currentQuery = currentCall[0].args.query?.toLowerCase().trim() || '';
+                
+                // Skip if current query is empty (malformed call)
+                if (!currentQuery) return false;
+                
+                // Find similar previous web searches
+                return prevCall.some(p => {
+                    if (p.name === 'web_search') {
+                        const prevQuery = p.args.query?.toLowerCase().trim() || '';
                         
-                        // Allow different queries even for same tool
-                        if (prevQuery !== newQuery) {
-                            // Check for substantial similarity (>80% overlap)
-                            const similarity = this._calculateStringSimilarity(prevQuery, newQuery);
-                            return similarity > 0.8; // Only flag if very similar
+                        // Skip if previous query is empty
+                        if (!prevQuery) return false;
+                        
+                        // Check for exact match
+                        if (prevQuery === currentQuery) {
+                            log(`[Tools] Exact duplicate search: "${prevQuery}"`);
+                            return true;
                         }
-                        return true; // Exact same query
-                    }
-                    
-                    // For system_settings, allow different actions/values
-                    if (newCall.name === 'system_settings') {
-                        const prevAction = prevCall.args.action;
-                        const newAction = newCall.args.action;
-                        const prevValue = prevCall.args.value;
-                        const newValue = newCall.args.value;
                         
-                        // Different actions are allowed
-                        if (prevAction !== newAction) return false;
-                        // Same action with different values is allowed
-                        if (prevValue !== newValue) return false;
+                        // Check for rearranged words (e.g. "weather Memphis" vs "Memphis weather")
+                        const currWords = new Set(currentQuery.split(/\s+/));
+                        const prevWords = new Set(prevQuery.split(/\s+/));
                         
-                        return true; // Same action and value
+                        // If either set contains at least 75% of the other's words, consider them similar
+                        const intersection = [...currWords].filter(word => prevWords.has(word));
+                        if (intersection.length >= currWords.size * 0.75 || 
+                            intersection.length >= prevWords.size * 0.75) {
+                            log(`[Tools] Similar search detected: "${prevQuery}" vs "${currentQuery}" (${intersection.length} common words)`);
+                            return true;
+                        }
+                        
+                        return false;
                     }
-                    
-                    // For fetch_web_content, check URLs
-                    if (newCall.name === 'fetch_web_content') {
-                        const prevUrls = JSON.stringify(prevCall.args.urls || []);
-                        const newUrls = JSON.stringify(newCall.args.urls || []);
-                        return prevUrls === newUrls;
-                    }
-                    
-                    // For other tools, do a general comparison
-                    return JSON.stringify(prevCall.args) === JSON.stringify(newCall.args);
+                    return false;
                 });
-            });
+            }
+            // For content fetching, check for URL overlaps
+            else if (currentCall[0].name === 'fetch_web_content' && prevCall.some(p => p.name === 'fetch_web_content')) {
+                const currentUrls = Array.isArray(currentCall[0].args.urls) ? 
+                    currentCall[0].args.urls : [currentCall[0].args.urls];
+                
+                // Check if we've already fetched any of these URLs
+                return prevCall.some(p => {
+                    if (p.name === 'fetch_web_content') {
+                        const prevUrls = Array.isArray(p.args.urls) ? p.args.urls : [p.args.urls];
+                        const overlap = currentUrls.filter(url => prevUrls.includes(url));
+                        if (overlap.length > 0) {
+                            log(`[Tools] Duplicate URL fetch detected: ${overlap.join(', ')}`);
+                            return true;
+                        }
+                        return false;
+                    }
+                    return false;
+                });
+            }
+            // For other tools, check for exact matches
+            const exactMatch = JSON.stringify(prevCall) === JSON.stringify(currentCall);
+            if (exactMatch) {
+                log(`[Tools] Exact duplicate tool call detected at position ${idx}`);
+            }
+            return exactMatch;
         });
 
         if (isRepeatedCall) {
@@ -2116,7 +2160,7 @@ Focus on giving the user a direct, helpful response based on what we've already 
                     }).join('\n\n');
 
                     // Make the follow-up prompt more directive for the LLM
-                    const followUpPrompt = `I have gathered information using tools. Here are the complete results:
+                    const followUpPrompt = `I have gathered all the necessary information using tools. Here are the complete results:
 
 ${toolResultsText}
 
@@ -2124,38 +2168,32 @@ CURRENT TOOL CALL SEQUENCE: ${this._recentToolCalls.map((calls, idx) =>
     `[Set ${idx+1}] ` + calls.map(call => `${call.name}("${JSON.stringify(call.args).substring(0, 40)}...")`).join(", ")
 ).join(" → ")}
 
-📋 ANALYSIS INSTRUCTIONS:
-1. **FIRST**: Review the tool results above - do they contain sufficient information to answer the user's question?
-2. **IF YES**: Provide a comprehensive answer using the gathered information. DO NOT make additional tool calls.
-3. **IF NO**: Identify what specific information is still missing and make targeted tool calls to gather it.
+⚠️ CRITICAL INSTRUCTIONS - READ CAREFULLY:
+1. You have ALL the information needed to answer the user's question above
+2. DO NOT make any new tool calls - the data gathering phase is COMPLETE
+3. Your job now is to SYNTHESIZE and PRESENT the information clearly
+4. Tool usage is DISABLED for this response - focus on analysis and presentation
+5. Structure your response to:
+   - Start with a direct answer to the user's question
+   - Include relevant details from the tool results above
+   - Cite sources when appropriate (URLs from the results)
+   - End with a clear conclusion
+6. Make your response:
+   - Complete and comprehensive using the data above
+   - Well-organized and easy to follow
+   - Based solely on the tool results provided
+   - Free of requests for additional information
 
-🔧 WHEN TO MAKE MORE TOOL CALLS:
-- The user asked for multiple pieces of information and you only have some of them
-- You need to follow up on URLs or references found in the results
-- The results indicate you need different tools (e.g., got search results, now need to fetch specific content)
-- The user's question has multiple parts that require different tools
+REMEMBER: You are in SYNTHESIS MODE - no more data gathering needed.
 
-🚫 WHEN NOT TO MAKE TOOL CALLS:
-- You have sufficient information to answer the user's question
-- The tool results already contain the answer, even if not perfectly formatted
-- You're just trying to get "better" or "more detailed" information when what you have is adequate
-- The user asked a simple question and you have the basic answer
-
-💡 MULTI-STEP EXAMPLE:
-- User asks: "What's the weather tomorrow and show me a recipe for pasta"
-- Step 1: web_search for weather ✓
-- Step 2: web_search for pasta recipe ✓  
-- Step 3: Synthesize both results into final answer (NO more tools needed)
-
-🎯 YOUR TASK NOW:
-Analyze the tool results above. If they answer the user's question, provide your final response. If you need additional specific information, make targeted tool calls. Be decisive - don't gather information "just in case."`;
+Please provide your final answer now using ONLY the information gathered above.`;
                     
                     log(`[Tools] Making follow-up request with tool results and instructions for next steps`);
                     
                     // Add a temporary message
                     this._addMessage("Processing tool results...", 'assistant', true);
                     
-                    // Keep tool calling enabled for legitimate multi-step workflows
+                    // Always enable tool calling for follow-up requests, and pass the current chatBox for history
                     this._providerAdapter.makeRequest(followUpPrompt, true)
                         .then(response => {
                             // Remove the temporary message
@@ -2290,20 +2328,11 @@ Analyze the tool results above. If they answer the user's question, provide your
             this._lastProviderConfig = { provider, maxTokens: MAX_TOKENS };
         }
         
-        const IMPORTANT_SENDERS = ['user', 'ai']; // Only include user and AI messages, exclude system/tool messages
+        const IMPORTANT_SENDERS = ['system', 'tool', 'memory'];
         const recentMessages = [...this._messages];
         let history = '';
         let tokenCount = 0;
         let omittedCount = 0;
-        
-        // Keywords to exclude from conversation history
-        const excludeKeywords = [
-            'opened', 'launched', 'executed', 'tool call', 'browser', 'chrome', 'firefox',
-            'youtube', 'website', 'application', 'window', 'tab', 'workspace', 'desktop',
-            'search results', 'fetched content', 'web search', 'found information',
-            'successfully', 'completed', 'finished', 'already ran', 'previously executed',
-            'tool execution', 'processing tool results'
-        ];
         
         // Improved token estimation based on provider
         const estimateTokens = (text) => {
@@ -2335,23 +2364,12 @@ Analyze the tool results above. If they answer the user's question, provide your
             return baseTokens + overhead;
         };
 
-        // Enhanced message formatting with token-aware truncation and filtering
+        // Enhanced message formatting with token-aware truncation
         const formatMessage = (msg, maxTokensForMessage = null) => {
             if (msg.isThinking && this._settings.get_boolean('hide-thinking')) return '';
             
-            // Skip system messages and tool-related messages
-            if (!IMPORTANT_SENDERS.includes(msg.sender)) return '';
-            
+            let formatted = '';
             let content = msg.text || '';
-            
-            // Skip messages that contain tool/action keywords
-            const contentLower = content.toLowerCase();
-            if (excludeKeywords.some(keyword => contentLower.includes(keyword))) {
-                return '';
-            }
-            
-            // Skip very short messages that are likely just confirmations
-            if (content.length < 20) return '';
             
             // Truncate very long messages if needed
             if (maxTokensForMessage && estimateTokens(content) > maxTokensForMessage) {
@@ -2361,18 +2379,44 @@ Analyze the tool results above. If they answer the user's question, provide your
                 }
             }
             
-            let formatted = '';
             if (msg.sender === 'user') {
                 formatted = `User: ${content}\n`;
             } else if (msg.sender === 'ai') {
                 formatted = `Assistant: ${content}\n`;
+                
+                // Include concise tool results summary
+                if (msg.toolResults && msg.toolResults.length > 0) {
+                    const toolSummary = msg.toolResults.map(result => {
+                        if (result.name === 'web_search' && result.query) {
+                            return `web_search("${result.query}")`;
+                        } else if (result.name === 'fetch_web_content' && result.urls) {
+                            const urlCount = Array.isArray(result.urls) ? result.urls.length : 1;
+                            return `fetch_web_content(${urlCount} URLs)`;
+                        } else {
+                            return `${result.name}()`;
+                        }
+                    }).join(', ');
+                    formatted += `[Used tools: ${toolSummary}]\n`;
+                }
+            } else if (msg.sender === 'system') {
+                // Truncate system messages more aggressively if needed
+                if (maxTokensForMessage && estimateTokens(content) > maxTokensForMessage) {
+                    const targetChars = Math.floor(maxTokensForMessage * 3.0);
+                    if (content.length > targetChars) {
+                        content = content.substring(0, targetChars - 30) + '...[truncated]';
+                    }
+                }
+                formatted = `System: ${content}\n`;
+            } else if (msg.sender === 'tool' || msg.sender === 'memory') {
+                formatted = `Tool: ${content}\n`;
             }
             
             return formatted;
         };
 
         // Phase 1: Collect and categorize messages by importance
-        const criticalMessages = [];    // Must include (recent user queries, AI responses)
+        const criticalMessages = [];    // Must include (recent user queries, tool results)
+        const importantMessages = [];   // Should include (system messages, memory)
         const regularMessages = [];     // Nice to have (older conversation)
         
         // Categorize messages by importance and recency
@@ -2384,14 +2428,13 @@ Analyze the tool results above. If they answer the user's question, provide your
                 continue; // Skip thinking messages if hidden
             }
             
-            // Only include user and AI messages
-            if (!IMPORTANT_SENDERS.includes(msg.sender)) {
-                continue;
-            }
-            
-            // Critical: Recent user messages and AI responses (last 8 messages)
-            if (age < 8) {
+            // Critical: Recent user messages and AI responses (last 6 messages)
+            if (age < 6 && (msg.sender === 'user' || msg.sender === 'ai')) {
                 criticalMessages.push(msg);
+            }
+            // Important: System messages, tool results, memory within last 20 messages
+            else if (age < 20 && IMPORTANT_SENDERS.includes(msg.sender)) {
+                importantMessages.push(msg);
             }
             // Regular: Everything else
             else {
@@ -2405,12 +2448,20 @@ Analyze the tool results above. If they answer the user's question, provide your
         // Always include critical messages (reverse to maintain chronological order)
         criticalMessages.reverse().forEach(msg => {
             const formatted = formatMessage(msg);
-            if (formatted) {
-                const tokens = estimateTokens(formatted);
-                if (tokenCount + tokens <= MAX_TOKENS) {
-                    messages.push({ msg, formatted, tokens });
-                    tokenCount += tokens;
-                }
+            const tokens = estimateTokens(formatted);
+            if (tokenCount + tokens <= MAX_TOKENS) {
+                messages.push({ msg, formatted, tokens });
+                tokenCount += tokens;
+            }
+        });
+        
+        // Add important messages if space allows
+        importantMessages.reverse().forEach(msg => {
+            const formatted = formatMessage(msg);
+            const tokens = estimateTokens(formatted);
+            if (tokenCount + tokens <= MAX_TOKENS * 0.8) { // Reserve 20% for regular messages
+                messages.push({ msg, formatted, tokens });
+                tokenCount += tokens;
             }
         });
         
@@ -2420,14 +2471,12 @@ Analyze the tool results above. If they answer the user's question, provide your
             if (remainingTokens > MIN_TOKENS) { // Ensure we have minimum space
                 const maxForMessage = Math.min(remainingTokens, MAX_TOKENS * 0.1); // Max 10% per message
                 const formatted = formatMessage(msg, maxForMessage);
-                if (formatted) {
-                    const tokens = estimateTokens(formatted);
-                    if (tokens <= remainingTokens) {
-                        messages.push({ msg, formatted, tokens });
-                        tokenCount += tokens;
-                    } else {
-                        omittedCount++;
-                    }
+                const tokens = estimateTokens(formatted);
+                if (tokens <= remainingTokens) {
+                    messages.push({ msg, formatted, tokens });
+                    tokenCount += tokens;
+                } else {
+                    omittedCount++;
                 }
             } else {
                 omittedCount++;
@@ -2448,6 +2497,16 @@ Analyze the tool results above. If they answer the user's question, provide your
             if (tokenCount + omissionTokens <= MAX_TOKENS) {
                 history += omissionSummary;
                 tokenCount += omissionTokens;
+            }
+        }
+        
+        // Add tool call summary to prevent redundancy
+        const recentToolCalls = this._getRecentToolCallSummary();
+        if (recentToolCalls) {
+            const toolCallTokens = estimateTokens(recentToolCalls);
+            if (tokenCount + toolCallTokens <= MAX_TOKENS) {
+                history += recentToolCalls;
+                tokenCount += toolCallTokens;
             }
         }
         
@@ -2606,6 +2665,8 @@ Analyze the tool results above. If they answer the user's question, provide your
             textLabel.clutter_text.ellipsize = Pango.EllipsizeMode.NONE;
             textLabel.clutter_text.single_line_mode = false;
             mainContent.add_child(textLabel);
+
+
 
             // Add sources if this is an AI message with tool results
             if (sender === 'ai' && toolResults) {
@@ -3445,22 +3506,6 @@ Analyze the tool results above. If they answer the user's question, provide your
 
         this._chatBox.append(messageBox);
         this._scrollToBottom();
-    }
-
-    _calculateStringSimilarity(str1, str2) {
-        // Simple similarity calculation based on common words
-        if (!str1 || !str2) return 0;
-        
-        const words1 = new Set(str1.toLowerCase().split(/\s+/).filter(w => w.length > 2));
-        const words2 = new Set(str2.toLowerCase().split(/\s+/).filter(w => w.length > 2));
-        
-        if (words1.size === 0 && words2.size === 0) return 1;
-        if (words1.size === 0 || words2.size === 0) return 0;
-        
-        const intersection = [...words1].filter(word => words2.has(word));
-        const union = new Set([...words1, ...words2]);
-        
-        return intersection.length / union.size; // Jaccard similarity
     }
 }
 

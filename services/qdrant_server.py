@@ -154,75 +154,80 @@ def process_memory_with_llm(text, context=None):
             if not llm:
                 llm = load_llm()
                 if not llm:
-                    return {"personal": [], "world_facts": [], "volatile": []}  # Return empty if LLM fails
+                    return {"personal": [text], "world_facts": [], "volatile": []}  # Return original as personal if LLM fails
     
     try:
-        # Quick check to avoid processing tool calls and temporary actions
-        text_lower = text.lower()
-        exclude_keywords = [
-            'opened', 'launched', 'executed', 'tool call', 'browser', 'chrome', 'firefox',
-            'youtube', 'website', 'application', 'window', 'tab', 'workspace', 'desktop',
-            'search results', 'fetched content', 'web search', 'found information',
-            'successfully', 'completed', 'finished', 'already ran', 'previously executed',
-            'current session', 'right now', 'at the moment', 'temporary', 'cache'
-        ]
-        
-        # If text contains tool/action keywords, skip LLM processing
-        if any(keyword in text_lower for keyword in exclude_keywords):
-            logger.info(f"Skipping LLM processing for tool/action content: {text[:50]}...")
-            return {"personal": [], "world_facts": [], "volatile": []}
-        
-        # Only process substantial content (avoid short responses)
-        if len(text) < 100:
-            logger.info(f"Skipping LLM processing for short content: {text[:50]}...")
-            return {"personal": [], "world_facts": [], "volatile": []}
+        # FIRST PASS: Extract personal information about the user
+        personal_prompt = f"""Analyze the following conversation and extract ONLY personal information about the USER. Focus on:
+- Where they live (city, state, country, neighborhood)
+- Personal preferences (favorite foods, colors, activities)
+- Opinions and viewpoints
+- Personal circumstances (job, family, hobbies)
+- Past experiences mentioned
+- Future plans or intentions
 
-        # FIRST PASS: Extract personal information about the user (more selective)
-        personal_prompt = f"""Analyze the following conversation and extract ONLY significant personal information about the USER. Focus ONLY on:
-- Where they live (specific city, state, country)
-- Strong personal preferences (favorite things, dislikes)
-- Important personal circumstances (job, family, major life events)
-- Significant skills or expertise they mention
-- Important goals or plans they share
-
-IGNORE: tool usage, browser actions, temporary requests, search queries, weather questions, or casual conversation.
+IGNORE general world facts, weather data, or temporary information.
 
 Conversation: {text}
-
-Extract 1-2 key personal insights ONLY if they are significant and lasting. If no important personal information is found, respond with "NONE".
+        
+        Context: {json.dumps(context) if context else 'No additional context'}
+        
+Extract 1-3 key personal insights about the user. If no personal information is found, respond with "NONE".
 
 Personal insights:
-1. """
+        1. """
         
         # Generate personal information extraction
         personal_response = llm(
             personal_prompt,
-            max_tokens=256,  # Reduced tokens for more focused output
-            temperature=0.1,  # Lower temperature for more focused extraction
-            stop=["Conversation:", "Context:", "Personal insights:", "2.", "3."],
+            max_tokens=512,
+            temperature=0.2,
+            stop=["Conversation:", "Context:", "Personal insights:", "2.", "3.", "4."],
             echo=False
         )
         
         personal_text = personal_response['choices'][0]['text'].strip()
         personal_memories = []
         
-        if personal_text and personal_text != "NONE" and len(personal_text) > 20:
-            # Only add if it's substantial and doesn't contain tool/action keywords
-            if not any(keyword in personal_text.lower() for keyword in exclude_keywords):
-                personal_memories.append(personal_text)
+        if personal_text and personal_text != "NONE":
+            # Parse numbered personal insights
+            for line in personal_text.split('\n'):
+                line = line.strip()
+            if line and not line.startswith(('1.', '2.', '3.', '4.', '5.')):
+                    if len(line) > 10:  # Only add substantial insights
+                        personal_memories.append(line)
+                    elif line and '.' in line:
+                        # Remove numbering and add to memories
+                        memory = line.split('.', 1)[1].strip() if '.' in line else line
+                        if memory and len(memory) > 10:
+                            personal_memories.append(memory)
+                        elif line and 'TYPE:' in line:
+                        # Handle TYPE: VOLATILE/STABLE
+                            if 'VOLATILE' in line:
+                                volatile_memories.append(line)
+                            elif 'STABLE' in line:
+                                world_memories.append(line)
         
-        # SECOND PASS: Extract important world facts (more selective)
-        world_facts_prompt = f"""Analyze the following conversation and extract ONLY important factual information. Focus ONLY on:
-- Significant historical facts or events
-- Important scientific or technical information
-- Educational content or explanations
-- Geographical or cultural information
+        # SECOND PASS: Extract world facts and determine volatility
+        world_facts_prompt = f"""Analyze the following conversation and extract factual information about the world. Focus on:
+- Current events and news
+- Weather information (mark as VOLATILE if time-sensitive)
+- Facts about places, organizations, or entities
+- Technical information or explanations
+- Historical facts or data
 
-IGNORE: current events, weather, news, search results, tool outputs, temporary information, or casual conversation.
+For each fact, determine if it's VOLATILE (time-sensitive) or STABLE (lasting):
+- VOLATILE: Weather forecasts, current events, temporary conditions, "today/tomorrow" information
+- STABLE: Historical facts, geographical information, general knowledge
 
 Conversation: {text}
 
-Extract important facts ONLY if they are educational and lasting. If no important facts are found, respond with "NONE".
+Context: {json.dumps(context) if context else 'No additional context'}
+
+Extract factual information in this format:
+TYPE: VOLATILE/STABLE
+FACT: [the factual statement]
+EXPIRES: [for VOLATILE only - date when this becomes outdated, format: YYYY-MM-DD]
 
 Facts:
 1. """
@@ -230,34 +235,85 @@ Facts:
         # Generate world facts extraction
         facts_response = llm(
             world_facts_prompt,
-            max_tokens=256,  # Reduced tokens
-            temperature=0.1,  # Lower temperature
-            stop=["Conversation:", "Context:", "Facts:", "2.", "3."],
+            max_tokens=512,
+            temperature=0.2,
+            stop=["Conversation:", "Context:", "Facts:"],
             echo=False
         )
         
         facts_text = facts_response['choices'][0]['text'].strip()
         world_memories = []
+        volatile_memories = []
         
-        if facts_text and facts_text != "NONE" and len(facts_text) > 20:
-            # Only add if it's substantial and doesn't contain tool/action keywords
-            if not any(keyword in facts_text.lower() for keyword in exclude_keywords):
-                world_memories.append(facts_text)
+        if facts_text:
+            # Parse structured facts
+            current_fact = {}
+            for line in facts_text.split('\n'):
+                line = line.strip()
+                if line.startswith('TYPE:'):
+                    current_fact['type'] = line.replace('TYPE:', '').strip()
+                elif line.startswith('FACT:'):
+                    current_fact['fact'] = line.replace('FACT:', '').strip()
+                elif line.startswith('EXPIRES:'):
+                    current_fact['expires'] = line.replace('EXPIRES:', '').strip()
+                elif line and line[0].isdigit() and '.' in line:
+                    # Process previous fact if complete
+                    if 'fact' in current_fact and current_fact['fact']:
+                        if current_fact.get('type') == 'VOLATILE':
+                            # Calculate expiration date
+                            expires_at = None
+                            if 'expires' in current_fact:
+                                try:
+                                    expires_at = datetime.datetime.strptime(current_fact['expires'], '%Y-%m-%d').isoformat()
+                                except:
+                                    # Default to 24 hours for volatile data
+                                    expires_at = (datetime.datetime.now() + datetime.timedelta(hours=24)).isoformat()
+                            else:
+                                expires_at = (datetime.datetime.now() + datetime.timedelta(hours=24)).isoformat()
+                                
+                            volatile_memories.append({
+                                'text': current_fact['fact'],
+                                'expires_at': expires_at
+                            })
+                        else:
+                            world_memories.append(current_fact['fact'])
+                    
+                    # Start new fact
+                    current_fact = {}
+            
+            # Process final fact if exists
+            if 'fact' in current_fact and current_fact['fact']:
+                if current_fact.get('type') == 'VOLATILE':
+                    expires_at = None
+                    if 'expires' in current_fact:
+                        try:
+                            expires_at = datetime.datetime.strptime(current_fact['expires'], '%Y-%m-%d').isoformat()
+                        except:
+                            expires_at = (datetime.datetime.now() + datetime.timedelta(hours=24)).isoformat()
+                    else:
+                        expires_at = (datetime.datetime.now() + datetime.timedelta(hours=24)).isoformat()
+                        
+                    volatile_memories.append({
+                        'text': current_fact['fact'],
+                        'expires_at': expires_at
+                    })
+                else:
+                    world_memories.append(current_fact['fact'])
 
-        # Return categorized memories (no volatile memories for now - too noisy)
+        # Return categorized memories
         result = {
-            "personal": personal_memories,
+            "personal": personal_memories if personal_memories else [text] if not world_memories and not volatile_memories else [],
             "world_facts": world_memories,
-            "volatile": []  # Disabled volatile memories to reduce noise
+            "volatile": volatile_memories
         }
         
-        logger.info(f"Memory extraction result: {len(result['personal'])} personal, {len(result['world_facts'])} world facts")
+        logger.info(f"Memory extraction result: {len(result['personal'])} personal, {len(result['world_facts'])} world facts, {len(result['volatile'])} volatile")
         return result
         
     except Exception as e:
         logger.error(f"Error processing memory with LLM: {str(e)}")
         logger.error(traceback.format_exc())
-        return {"personal": [], "world_facts": [], "volatile": []}  # Return empty on error
+        return {"personal": [text], "world_facts": [], "volatile": []}  # Return original as personal on error
 
 # Initialize Qdrant client
 QDRANT_DIR = os.path.expanduser("~/.local/share/gnome-shell/extensions/llmchat@charja113.gmail.com/qdrant")
@@ -391,57 +447,32 @@ def index_documents():
         for doc in documents:
             try:
                 if namespace == 'memories' or namespace == 'llm_memories':
-                    # Quick check to avoid processing tool calls and temporary actions
-                    text_lower = doc['text'].lower()
-                    exclude_keywords = [
-                        'opened', 'launched', 'executed', 'tool call', 'browser', 'chrome', 'firefox',
-                        'youtube', 'website', 'application', 'window', 'tab', 'workspace', 'desktop',
-                        'search results', 'fetched content', 'web search', 'found information',
-                        'successfully', 'completed', 'finished', 'already ran', 'previously executed',
-                        'current session', 'right now', 'at the moment', 'temporary', 'cache'
-                    ]
-                    
-                    # Skip processing if it contains tool/action keywords
-                    if any(keyword in text_lower for keyword in exclude_keywords):
-                        logger.info(f"Skipping tool/action content: {doc['text'][:50]}...")
-                        continue
-                    
-                    # Skip very short content
-                    if len(doc['text']) < 100:
-                        logger.info(f"Skipping short content: {doc['text'][:50]}...")
-                        continue
-                    
                     # Process memory with LLM - now returns categorized memories
                     memory_results = process_memory_with_llm(doc['text'], doc.get('context'))
                     
-                    # Only create documents if we actually extracted meaningful memories
-                    memories_created = False
-                    
                     # Create documents for personal memories (user_info namespace)
                     for personal_memory in memory_results.get('personal', []):
-                        if personal_memory.strip() and len(personal_memory) > 20:
+                        if personal_memory.strip():
                             new_doc = doc.copy()
                             new_doc['text'] = personal_memory
                             new_doc['id'] = f"{doc['id']}_personal_{uuid.uuid4().hex[:8]}"
                             new_doc['namespace'] = 'user_info'  # Store personal info separately
                             new_doc['memory_type'] = 'personal'
                             processed_documents.append(new_doc)
-                            memories_created = True
                     
                     # Create documents for world facts (world_facts namespace)
                     for world_fact in memory_results.get('world_facts', []):
-                        if world_fact.strip() and len(world_fact) > 20:
+                        if world_fact.strip():
                             new_doc = doc.copy()
                             new_doc['text'] = world_fact
                             new_doc['id'] = f"{doc['id']}_world_{uuid.uuid4().hex[:8]}"
                             new_doc['namespace'] = 'world_facts'
                             new_doc['memory_type'] = 'world_fact'
                             processed_documents.append(new_doc)
-                            memories_created = True
                     
-                    # Create documents for volatile memories (volatile_info namespace) - currently disabled
+                    # Create documents for volatile memories (volatile_info namespace)
                     for volatile_memory in memory_results.get('volatile', []):
-                        if volatile_memory.get('text', '').strip() and len(volatile_memory.get('text', '')) > 20:
+                        if volatile_memory.get('text', '').strip():
                             new_doc = doc.copy()
                             new_doc['text'] = volatile_memory['text']
                             new_doc['id'] = f"{doc['id']}_volatile_{uuid.uuid4().hex[:8]}"
@@ -453,12 +484,14 @@ def index_documents():
                             new_doc['context']['is_volatile'] = True
                             new_doc['context']['expires_at'] = volatile_memory.get('expires_at')
                             processed_documents.append(new_doc)
-                            memories_created = True
                     
-                    # If no meaningful memories were extracted, don't store anything
-                    if not memories_created:
-                        logger.info(f"No meaningful memories extracted from: {doc['text'][:50]}...")
-                        continue
+                    # If no memories were extracted, store original as personal memory
+                    if not memory_results.get('personal') and not memory_results.get('world_facts') and not memory_results.get('volatile'):
+                        new_doc = doc.copy()
+                        new_doc['id'] = f"{doc['id']}_{uuid.uuid4().hex[:8]}"
+                        new_doc['namespace'] = 'user_info'  # Default to personal
+                        new_doc['memory_type'] = 'personal'
+                        processed_documents.append(new_doc)
                 else:
                     # For non-memory documents (like tools), assign the namespace and process directly
                     new_doc = doc.copy()
@@ -466,8 +499,10 @@ def index_documents():
                     processed_documents.append(new_doc)
             except Exception as e:
                 logger.warning(f"Error processing document {doc.get('id', 'unknown')}: {str(e)}")
-                # For error cases, don't store anything to avoid noise
-                continue
+                # For error cases, still try to process with assigned namespace
+                new_doc = doc.copy()
+                new_doc['namespace'] = namespace
+                processed_documents.append(new_doc)
 
         # Ensure all required collections exist
         collections_needed = set([doc.get('namespace', namespace) for doc in processed_documents])
